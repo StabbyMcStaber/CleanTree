@@ -1,0 +1,69 @@
+name: Release CleanTree
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate version and build addon ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          TOC_VERSION="$(sed -n 's/^## Version:[[:space:]]*//p' CleanTree/CleanTree.toc | head -n 1 | tr -d '\r')"
+
+          if [[ -z "$TOC_VERSION" ]]; then
+            echo "Could not read ## Version from CleanTree/CleanTree.toc"
+            exit 1
+          fi
+
+          if [[ "$TOC_VERSION" != "$VERSION" ]]; then
+            echo "Tag/version mismatch: tag=$TAG, CleanTree.toc=$TOC_VERSION"
+            exit 1
+          fi
+
+          ZIP="CleanTree-${TAG}.zip"
+          zip -r "$ZIP" CleanTree \
+            -x "*/.DS_Store" "*/Thumbs.db" "*/Desktop.ini"
+
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Create release or upload asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          NOTES_FILE=".github/release-notes/${TAG}.md"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --clobber
+            exit 0
+          fi
+
+          if [[ -f "$NOTES_FILE" ]]; then
+            gh release create "$TAG" "$ZIP" \
+              --verify-tag \
+              --title "CleanTree $TAG" \
+              --notes-file "$NOTES_FILE"
+          else
+            gh release create "$TAG" "$ZIP" \
+              --verify-tag \
+              --title "CleanTree $TAG" \
+              --generate-notes
+          fi
