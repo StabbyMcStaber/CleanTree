@@ -1,4 +1,4 @@
--- CleanTree v1.1.0-beta6
+-- CleanTree v1.1.1
 -- Project Ebonhold / WoW 3.3.5a
 --
 -- Functional replacement UI for the Soul Ash Skill Tree.
@@ -12,7 +12,7 @@
 
 EbonTreeDB = EbonTreeDB or {}
 
-local VERSION = "1.1.0-beta6"
+local VERSION = "1.1.1"
 local DATA = _G.EbonTreeData or { nodes = {} }
 local ET = CreateFrame("Frame")
 _G.EbonTree = ET
@@ -356,6 +356,9 @@ local function clearTreeCaches()
     treeFrameCache = nil
     treeFrameCacheStamp = 0
     nodeButtonCache = {}
+    -- Ebonhold may rebuild the native footer. Never keep an Apply button
+    -- reference across a tree refresh because it may point at a dead frame.
+    nativeApplyButton = nil
 end
 
 local function allTreeFrames()
@@ -2946,21 +2949,40 @@ ET.FinishPendingRemoval = function(after)
 end
 
 local function findApplyButton()
-    if nativeApplyButton then return nativeApplyButton end
-    local frames = allTreeFrames()
-    for _, f in ipairs(frames) do
-        if f and hasClickHandler(f) then
-            local texts = {}
-            collectFrameTexts(f, texts, {}, 1)
-            for _, t in ipairs(texts) do
-                if lower(trim(t)) == "apply changes" then
-                    nativeApplyButton = f
-                    return f
+    -- The native footer can be rebuilt by Ebonhold while CleanTree is open.
+    -- Do not trust a cached Apply frame, and do not let the scan accidentally
+    -- rediscover CleanTree's own APPLY CHANGES button. Prefer the current
+    -- skillTreeBottomBar subtree, which is where the authoritative native
+    -- button lives.
+    nativeApplyButton = nil
+
+    local function scan(frames)
+        for _, f in ipairs(frames or {}) do
+            if f and f ~= applyButton and hasClickHandler(f) then
+                local texts = {}
+                collectFrameTexts(f, texts, {}, 1)
+                for _, t in ipairs(texts) do
+                    if lower(trim(t)) == "apply changes" then
+                        nativeApplyButton = f
+                        return f
+                    end
                 end
             end
         end
+        return nil
     end
-    return nil
+
+    local bottom = _G.skillTreeBottomBar
+    if bottom then
+        local frames = {}
+        collectChildren(bottom, frames, {}, 0, 10)
+        local found = scan(frames)
+        if found then return found end
+    end
+
+    -- Defensive fallback for an Ebonhold revision that relocates the Apply
+    -- control outside skillTreeBottomBar. CleanTree's own button is excluded.
+    return scan(allTreeFrames())
 end
 
 local function applyChanges()
@@ -4055,6 +4077,30 @@ local function restoreNativeVisuals()
         if frame and frame.SetAlpha then pcall(frame.SetAlpha, frame, state.alpha or 1) end
     end
     nativeVisualState = {}
+    nativeApplyButton = nil
+
+    -- Ebonhold can replace the scroll/footer frames after CleanTree originally
+    -- recorded their alpha. The periodic suppression loop may therefore have
+    -- hidden a newer frame that was never present in nativeVisualState. When
+    -- the player explicitly restores native mode, make the current native
+    -- content parents visible as a final authoritative cleanup.
+    if EbonTreeDB and EbonTreeDB.nativeMode == true then
+        for _, frame in ipairs({_G.skillTreeScroll, _G.skillTreeCanvas, _G.skillTreeBottomBar}) do
+            if frame and frame.SetAlpha then pcall(frame.SetAlpha, frame, 1) end
+        end
+
+        local search = _G.skillTreeSearchBox
+        if search then
+            if search.SetAlpha then pcall(search.SetAlpha, search, 1) end
+            if search.Show then pcall(search.Show, search) end
+        end
+
+        local nativeApply = findApplyButton()
+        if nativeApply then
+            if nativeApply.SetAlpha then pcall(nativeApply.SetAlpha, nativeApply, 1) end
+            if nativeApply.Show then pcall(nativeApply.Show, nativeApply) end
+        end
+    end
 end
 
 -- Native/CleanTree mode switcher.  Keep the stock tree alive underneath at all
@@ -5150,9 +5196,19 @@ ET:SetScript("OnUpdate", function(self, elapsed)
         local nativeScroll = _G.skillTreeScroll
         local nativeCanvas = _G.skillTreeCanvas
         local nativeBottom = _G.skillTreeBottomBar
-        if nativeScroll and nativeScroll.SetAlpha then pcall(nativeScroll.SetAlpha, nativeScroll, 0)
-        elseif nativeCanvas and nativeCanvas.SetAlpha then pcall(nativeCanvas.SetAlpha, nativeCanvas, 0) end
-        if nativeBottom and nativeBottom.SetAlpha then pcall(nativeBottom.SetAlpha, nativeBottom, 0) end
+        if nativeScroll and nativeScroll.SetAlpha then
+            rememberNativeVisual(nativeScroll)
+            pcall(nativeScroll.SetAlpha, nativeScroll, 0)
+        elseif nativeCanvas and nativeCanvas.SetAlpha then
+            rememberNativeVisual(nativeCanvas)
+            pcall(nativeCanvas.SetAlpha, nativeCanvas, 0)
+        end
+        if nativeBottom and nativeBottom.SetAlpha then
+            -- Track replacement footers before hiding them so Restore Native
+            -- can always recover Soul Ash, Apply Changes, and Search.
+            rememberNativeVisual(nativeBottom)
+            pcall(nativeBottom.SetAlpha, nativeBottom, 0)
+        end
     end
 
     -- Lazy ownership can become authoritative only after a visible row binds to
