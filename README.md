@@ -4,12 +4,17 @@ A cleaner way to use Project Ebonhold's Soul Ash Skill Tree.
 
 Project Ebonhold's Skill Tree is enormous. CleanTree keeps the real Ebonhold tree and server logic underneath, but replaces the giant graph with a compact list/detail interface built directly into the native Progression window. Browse what is available, search by node or effect, stage purchases, review the cart, and apply changes without hunting through hundreds of icons.
 
+<p align="center">
+  <img src="assets/screenshots/unowned.png" alt="CleanTree Unowned view" width="100%">
+</p>
+
 ---
 
 ## Table of Contents
 
 - [🔥 Why this addon](#-why-this-addon)
 - [✨ Features](#-features)
+- [📸 Screenshots](#-screenshots)
 - [📋 Requirements](#-requirements)
 - [💾 Installation](#-installation)
 - [🚀 Quick start](#-quick-start)
@@ -45,6 +50,32 @@ CleanTree presents the same live tree as a stable, searchable list while leaving
 | ♾️ | Include all three Endless nodes as repeatable multi-rank purchases |
 | ↔️ | Switch between **CleanTree** and the original Ebonhold Skill Tree at any time |
 | 🧪 | Keep diagnostic commands available for EbonAPI/native-tree troubleshooting |
+
+## 📸 Screenshots
+
+### 🧭 Browse unowned nodes
+
+CleanTree turns the native visual graph into a stable, searchable list while preserving the real Ebonhold prerequisite and purchase state underneath.
+
+![CleanTree Unowned view](assets/screenshots/unowned.png)
+
+### 🛒 Stage and review purchases
+
+Purchases are staged through the native Skill Tree system and collected in **Cart** before being committed with **Apply Changes**.
+
+![CleanTree Cart view](assets/screenshots/cart.png)
+
+### ♾️ Endless nodes
+
+CleanTree includes Ebonhold's three repeatable Endless nodes and displays their live rank and next-rank cost.
+
+![CleanTree Endless view](assets/screenshots/endless.png)
+
+### ✅ Purchased nodes
+
+The **Purchased** view shows server-committed ranks reported through EbonAPI.
+
+![CleanTree Purchased view](assets/screenshots/purchased.png)
 
 ## 📋 Requirements
 
