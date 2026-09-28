@@ -1,3 +1,47 @@
+CleanTree v1.1.0-beta6
+
+Shopping Lists visual/readability hotfix:
+- Restores Shopping Lists to CleanTree's black/charcoal panel palette instead of brown/gold backgrounds.
+- Import/Export now has a clearly labeled, bordered black text-entry well so it is obvious where to paste/copy CTSL1 strings.
+- Import immediately focuses the text-entry area and positions the cursor at the start.
+- Auto-purchase completion details are sent to chat while the in-window status remains short, preventing header text overlap.
+- Widens the normal CleanTree status line to reduce wrapping.
+
+CleanTree v1.1.0-beta5
+
+Shopping Lists mouse-input hotfix:
+- Shopping Lists now uses FULLSCREEN_DIALOG strata with sane frame levels instead of very large legacy frame levels.
+- The window is hosted on UIParent for reliable mouse ownership, while existing lifecycle hooks still close it with Progression/CleanTree.
+- Shopping List panels and controls use explicit dialog levels so underlying Progression frames cannot intercept clicks.
+- Shopping List backgrounds now use a solid texture for much better contrast/readability.
+
+CleanTree v1.1.0-beta3
+
+Shopping Lists UI hotfix:
+- Shopping Lists is now parented to CleanTree instead of UIParent, so it follows /progression visibility.
+- Closing Progression or restoring the native Skill Tree closes Shopping Lists and its Import/Export window.
+- Shopping Lists is explicitly raised above the CleanTree pane so buttons receive mouse clicks.
+- Shopping List backgrounds are brighter and fully opaque for better readability.
+
+CleanTree v1.1.0-beta2
+
+Buyable Now beta:
+- Adds a one-click Buyable Now header button beside Shopping Lists.
+- Shows only nodes that are currently unlocked by prerequisites and affordable with the player's live Soul Ash balance.
+- Recalculates after staged purchases, so newly unlocked/affordable nodes appear immediately and spent nodes disappear.
+- Uses the same EbonAPI prerequisite authority and native staged Soul Ash state as normal CleanTree purchasing.
+- Includes Endless nodes only when their next rank is genuinely available and affordable.
+
+Shopping Lists beta:
+- Adds exact ordered Shopping Lists for finite Skill Tree purchases.
+- Includes Full Tree Order, Damage First, Survival First, Convenience First, Balanced, and Cheapest First starter lists.
+- Auto-purchase treats list order as a live priority queue: locked/unaffordable entries are skipped temporarily and priority #1 is retried after every successful purchase.
+- Auto-purchase stages native Ebonhold purchases only and never clicks Apply Changes for the player.
+- Adds New, Copy, Rename, Delete, Append Missing, node search/add, and exact Top/Up/Down/Bottom ordering controls.
+- Adds versioned single-string export/import using exact node IDs: CTSL1:<name>:<ordered IDs>.
+- Imported lists are created immediately and selected as the active Shopping List.
+- Endless nodes are intentionally excluded from Shopping Lists.
+
 CleanTree v1.0.0
 
 First public release:
