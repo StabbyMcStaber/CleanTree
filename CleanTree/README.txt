@@ -1,3 +1,11 @@
+CleanTree v1.1.1
+
+Native footer / Apply hotfix:
+- Re-resolves the native Apply Changes button from the current skillTreeBottomBar instead of trusting a stale cached frame.
+- Prevents CleanTree from accidentally identifying its own APPLY CHANGES button as the native Apply control.
+- Tracks Ebonhold replacement footer/scroll frames before suppressing them so Restore Native can restore the current live frames.
+- Restore Native now explicitly restores the live native scroll/canvas/footer, Search box, and Apply control.
+
 CleanTree v1.1.0-beta6
 
 Shopping Lists visual/readability hotfix:
