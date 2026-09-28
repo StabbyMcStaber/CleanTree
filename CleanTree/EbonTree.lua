@@ -1,4 +1,4 @@
--- CleanTree v1.0.0
+-- CleanTree v1.1.0-beta6
 -- Project Ebonhold / WoW 3.3.5a
 --
 -- Functional replacement UI for the Soul Ash Skill Tree.
@@ -12,7 +12,7 @@
 
 EbonTreeDB = EbonTreeDB or {}
 
-local VERSION = "1.0.0"
+local VERSION = "1.1.0-beta6"
 local DATA = _G.EbonTreeData or { nodes = {} }
 local ET = CreateFrame("Frame")
 _G.EbonTree = ET
@@ -33,6 +33,7 @@ local C = {
 local CATEGORY_LABELS = {
     ALL = "All",
     UNOWNED = "Unowned",
+    BUYABLE = "Buyable Now",
     DAMAGE = "Damage",
     SURVIVAL = "Survival",
     CONVENIENCE = "Convenience",
@@ -2255,6 +2256,8 @@ rebuildFiltered = function()
         return
     end
 
+    local buyableAsh = selectedCategory == "BUYABLE" and readSoulAsh() or nil
+
     for _, node in pairs(liveNodes) do
         -- Keep category membership authoritative. A node can become purchased
         -- after staging/apply without a full rediscovery pass; filtering on a
@@ -2267,6 +2270,18 @@ rebuildFiltered = function()
             local bridge = _G.CleanTreeEbonAPI
             local committedKnown = bridge and bridge.HasServerLoadout and bridge.HasServerLoadout()
             include = (not node.isEndless) and ((committedKnown and node.fullyCommitted == true) or ((not committedKnown) and node.fullyOwned == true))
+        elseif selectedCategory == "BUYABLE" then
+            -- One-click live shopping view: only show nodes whose prerequisites
+            -- are currently satisfied AND whose next rank the player can afford
+            -- with the Soul Ash available right now. This intentionally includes
+            -- Endless nodes when they are genuinely buyable.
+            local cost = nodeCost(node)
+            include = (node.fullyOwned ~= true or node.isEndless == true)
+                      and node.button ~= nil
+                      and nodeStructuralAvailability(node) == true
+                      and cost ~= nil
+                      and buyableAsh ~= nil
+                      and buyableAsh >= cost
         elseif selectedCategory == "UNOWNED" then
             -- Default browsing view: finite nodes the player has not completed.
             -- Endless has its own dedicated tab.
@@ -2719,10 +2734,13 @@ setStatus = function(msg, seconds)
     refreshHeader()
 end
 
-local function stageNode(node)
+local function stageNode(node, shoppingAuto)
     if pendingClick then
         setStatus("Waiting for the previous node click to settle.", 3)
         return
+    end
+    if ET.shoppingRun and ET.shoppingRun.active and not shoppingAuto then
+        ET.StopShoppingAuto("Shopping List auto-purchase stopped because you made a manual purchase.")
     end
     if not node then return end
     syncNodeOwnership(node)
@@ -2781,6 +2799,7 @@ local function stageNode(node)
         beforeTip = beforeTip,
         beforeRank = beforeRank,
         elapsed = 0,
+        shoppingAuto = shoppingAuto == true,
     }
     setStatus("Staging " .. tostring(node.name) .. "...", 2)
 end
@@ -2824,9 +2843,17 @@ local function finishPendingClick(after)
         node.nativeCanLearn = nil
         ET.RefreshEndlessLiveData(node, node.button)
     end
-    setStatus("Staged " .. tostring(node.name) .. " for " .. formatNumber(delta) .. " Soul Ash.", 3)
+    if p.shoppingAuto and ET.shoppingRun and ET.shoppingRun.active then
+        ET.shoppingRun.purchased = (ET.shoppingRun.purchased or 0) + 1
+        ET.shoppingRun.spent = (ET.shoppingRun.spent or 0) + math.max(0, tonumber(delta) or 0)
+        setStatus("Shopping List staged " .. tostring(node.name) .. " for " .. formatNumber(delta) .. " Soul Ash.", 2)
+        ET._shoppingResumeDelay = 0.08
+    else
+        setStatus("Staged " .. tostring(node.name) .. " for " .. formatNumber(delta) .. " Soul Ash.", 3)
+    end
     refreshRows()
     refreshDetail(node)
+    if ET.RefreshShoppingUI then ET.RefreshShoppingUI() end
 end
 
 -- Remove one staged rank using the same native behavior Ebonhold exposes:
@@ -3008,6 +3035,780 @@ local function makeButton(parent, text, width, height)
     b:SetHeight(height or 24)
     b:SetText(text or "Button")
     return b
+end
+
+
+-- Shopping Lists ------------------------------------------------------------
+-- A Shopping List is an exact ordered set of finite Skill Tree node IDs. The
+-- order is treated as a live priority queue: locked/unaffordable entries are
+-- temporarily skipped, and after every accepted purchase CleanTree starts again
+-- at priority #1. This mirrors the successful AshBuild custom-priority behavior
+-- while keeping the player in control of the exact node order.
+
+ET.SHOPPING_EXPORT_VERSION = "CTSL1"
+ET.SHOPPING_SEED_VERSION = 1
+ET.shoppingFrame = nil
+ET.shoppingImportFrame = nil
+ET.shoppingExportFrame = nil
+ET.shoppingSelectedName = nil
+ET.shoppingListRows = {}
+ET.shoppingEntryRows = {}
+ET.shoppingSearchRows = {}
+ET.shoppingSearchResults = {}
+ET.shoppingSearchOffset = 0
+ET.shoppingRun = { active = false, purchased = 0, spent = 0 }
+ET._shoppingResumeDelay = 0
+
+-- Shopping Lists are rendered as a true modal dialog on UIParent.  Do not try
+-- to outrun Ebonhold's nested Progression frames with huge frame levels: the
+-- 3.3.5 client can flatten/clamp old frame-level stacks, leaving buttons visible
+-- while another frame still owns the mouse.  FULLSCREEN_DIALOG gives this UI a
+-- clean strata boundary.  Lifecycle hooks below still close it with /progression.
+ET.SHOP_COLORS = ET.SHOP_COLORS or {
+    -- Match CleanTree's established black/charcoal panels. Gold remains an
+    -- accent/border color, not the dominant background color.
+    BG     = {0.035, 0.035, 0.045, 1.00},
+    PANEL  = {0.075, 0.075, 0.090, 1.00},
+    PANEL2 = {0.105, 0.105, 0.125, 1.00},
+    ROW_A  = {0.065, 0.065, 0.080, 1.00},
+    ROW_B  = {0.095, 0.095, 0.115, 1.00},
+    INPUT  = {0.020, 0.020, 0.028, 1.00},
+}
+
+function ET.SetShoppingBackdrop(frame, color)
+    if not frame or not frame.SetBackdrop then return end
+    frame:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = {left=4, right=4, top=4, bottom=4},
+    })
+    frame:SetBackdropColor(unpack(color or ET.SHOP_COLORS.PANEL))
+    frame:SetBackdropBorderColor(0.72, 0.55, 0.18, 1)
+end
+
+function ET.SetShoppingLevel(frame, level)
+    if not frame then return end
+    if frame.SetFrameStrata then pcall(frame.SetFrameStrata, frame, "FULLSCREEN_DIALOG") end
+    if frame.SetFrameLevel then pcall(frame.SetFrameLevel, frame, level or 10) end
+    if frame.EnableMouse then pcall(frame.EnableMouse, frame, true) end
+    if frame.SetToplevel then pcall(frame.SetToplevel, frame, true) end
+end
+
+function ET.SyncShoppingFrameLayer(frame, parent, level)
+    frame = frame or ET.shoppingFrame
+    parent = parent or UIParent
+    if not frame or not parent then return end
+    if frame.SetParent and frame.GetParent then
+        local ok, current = pcall(frame.GetParent, frame)
+        if (not ok) or current ~= parent then pcall(frame.SetParent, frame, parent) end
+    end
+    ET.SetShoppingLevel(frame, level or 10)
+    if frame.Raise then pcall(frame.Raise, frame) end
+end
+
+function ET.HideShoppingUI()
+    if ET.shoppingTransferFrame and ET.shoppingTransferFrame.Hide then ET.shoppingTransferFrame:Hide() end
+    if ET.shoppingFrame and ET.shoppingFrame.Hide then ET.shoppingFrame:Hide() end
+end
+
+function ET.ShoppingSafeName(name)
+    name = compactSpace(name or "Shopping List")
+    name = string.gsub(name, "[|:]", "-")
+    if name == "" then name = "Shopping List" end
+    if string.len(name) > 42 then name = string.sub(name, 1, 42) end
+    return name
+end
+
+function ET.ShoppingEncodeName(name)
+    return (string.gsub(tostring(name or ""), "([^%w%-%._ ])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+function ET.ShoppingDecodeName(name)
+    return (string.gsub(tostring(name or ""), "%%(%x%x)", function(h)
+        return string.char(tonumber(h, 16))
+    end))
+end
+
+function ET.ShoppingNodeCostByID(id)
+    local def = DATA.nodes and DATA.nodes[tonumber(id)] or nil
+    local rank = def and def.ranks and def.ranks[1] or nil
+    return rank and tonumber(rank.cost) or 0
+end
+
+function ET.ShoppingCategoryByID(id)
+    local graph = _G.EbonTreeOrderData
+    if graph and graph.categoryById and graph.categoryById[tonumber(id)] then
+        return graph.categoryById[tonumber(id)]
+    end
+    local def = DATA.nodes and DATA.nodes[tonumber(id)] or nil
+    return def and def.category or "OTHER"
+end
+
+function ET.ShoppingOrderedIDs(categoryOrder, cheapest)
+    local ids = {}
+    for id, def in pairs(DATA.nodes or {}) do
+        ids[#ids + 1] = tonumber(id)
+    end
+    local catRank = {}
+    if type(categoryOrder) == "table" then
+        for i, c in ipairs(categoryOrder) do catRank[c] = i end
+    end
+    table.sort(ids, function(a, b)
+        if cheapest then
+            local ac, bc = ET.ShoppingNodeCostByID(a), ET.ShoppingNodeCostByID(b)
+            if ac ~= bc then return ac < bc end
+        end
+        if next(catRank) then
+            local ar = catRank[ET.ShoppingCategoryByID(a)] or 99
+            local br = catRank[ET.ShoppingCategoryByID(b)] or 99
+            if ar ~= br then return ar < br end
+        end
+        local graph = _G.EbonTreeOrderData
+        local ao = graph and graph.orderById and tonumber(graph.orderById[a]) or 2147483647
+        local bo = graph and graph.orderById and tonumber(graph.orderById[b]) or 2147483647
+        if ao ~= bo then return ao < bo end
+        return a < b
+    end)
+    return ids
+end
+
+function ET.ShoppingBalancedIDs()
+    local buckets = { DAMAGE = {}, SURVIVAL = {}, CONVENIENCE = {}, OTHER = {} }
+    local all = ET.ShoppingOrderedIDs(nil, false)
+    for _, id in ipairs(all) do
+        local c = ET.ShoppingCategoryByID(id)
+        local b = buckets[c] or buckets.OTHER
+        b[#b + 1] = id
+    end
+    local out, i = {}, 1
+    while true do
+        local added = false
+        for _, c in ipairs({"DAMAGE", "SURVIVAL", "CONVENIENCE", "OTHER"}) do
+            if buckets[c][i] then out[#out + 1] = buckets[c][i]; added = true end
+        end
+        if not added then break end
+        i = i + 1
+    end
+    return out
+end
+
+function ET.CopyIDList(src)
+    local out = {}
+    for i, id in ipairs(src or {}) do out[i] = tonumber(id) end
+    return out
+end
+
+function ET.EnsureShoppingLists()
+    if type(EbonTreeDB.shoppingLists) ~= "table" then EbonTreeDB.shoppingLists = {} end
+    if tonumber(EbonTreeDB.shoppingSeedVersion or 0) < ET.SHOPPING_SEED_VERSION then
+        local seeds = {
+            {"Full Tree Order", ET.ShoppingOrderedIDs(nil, false)},
+            {"Damage First", ET.ShoppingOrderedIDs({"DAMAGE", "SURVIVAL", "CONVENIENCE", "OTHER"}, false)},
+            {"Survival First", ET.ShoppingOrderedIDs({"SURVIVAL", "DAMAGE", "CONVENIENCE", "OTHER"}, false)},
+            {"Convenience First", ET.ShoppingOrderedIDs({"CONVENIENCE", "DAMAGE", "SURVIVAL", "OTHER"}, false)},
+            {"Balanced", ET.ShoppingBalancedIDs()},
+            {"Cheapest First", ET.ShoppingOrderedIDs(nil, true)},
+        }
+        for _, seed in ipairs(seeds) do
+            if not EbonTreeDB.shoppingLists[seed[1]] then
+                EbonTreeDB.shoppingLists[seed[1]] = { name = seed[1], entries = ET.CopyIDList(seed[2]), seeded = true }
+            end
+        end
+        EbonTreeDB.shoppingSeedVersion = ET.SHOPPING_SEED_VERSION
+    end
+    if not EbonTreeDB.activeShoppingList or not EbonTreeDB.shoppingLists[EbonTreeDB.activeShoppingList] then
+        EbonTreeDB.activeShoppingList = "Full Tree Order"
+    end
+    if not ET.shoppingSelectedName or not EbonTreeDB.shoppingLists[ET.shoppingSelectedName] then
+        ET.shoppingSelectedName = EbonTreeDB.activeShoppingList
+    end
+end
+
+function ET.ShoppingListNames()
+    ET.EnsureShoppingLists()
+    local names = {}
+    local preferred = {"Full Tree Order", "Damage First", "Survival First", "Convenience First", "Balanced", "Cheapest First"}
+    local seen = {}
+    for _, name in ipairs(preferred) do
+        if EbonTreeDB.shoppingLists[name] then names[#names + 1] = name; seen[name] = true end
+    end
+    local custom = {}
+    for name in pairs(EbonTreeDB.shoppingLists) do if not seen[name] then custom[#custom + 1] = name end end
+    table.sort(custom, function(a,b) return lower(a) < lower(b) end)
+    for _, name in ipairs(custom) do names[#names + 1] = name end
+    return names
+end
+
+function ET.UniqueShoppingName(base)
+    ET.EnsureShoppingLists()
+    base = ET.ShoppingSafeName(base)
+    if not EbonTreeDB.shoppingLists[base] then return base end
+    local i = 2
+    while EbonTreeDB.shoppingLists[base .. " (" .. tostring(i) .. ")"] do i = i + 1 end
+    return base .. " (" .. tostring(i) .. ")"
+end
+
+function ET.CreateShoppingList(name, entries)
+    ET.EnsureShoppingLists()
+    name = ET.UniqueShoppingName(name or "My Shopping List")
+    EbonTreeDB.shoppingLists[name] = { name = name, entries = ET.CopyIDList(entries or {}) }
+    ET.shoppingSelectedName = name
+    ET.RefreshShoppingUI()
+    return name
+end
+
+function ET.DeleteShoppingList(name)
+    ET.EnsureShoppingLists()
+    if not name or not EbonTreeDB.shoppingLists[name] then return end
+    if name == EbonTreeDB.activeShoppingList and ET.shoppingRun and ET.shoppingRun.active then
+        ET.StopShoppingAuto("Shopping List auto-purchase stopped because the active list was deleted.")
+    end
+    EbonTreeDB.shoppingLists[name] = nil
+    local names = ET.ShoppingListNames()
+    ET.shoppingSelectedName = names[1]
+    if not EbonTreeDB.shoppingLists[EbonTreeDB.activeShoppingList] then EbonTreeDB.activeShoppingList = names[1] end
+    ET.RefreshShoppingUI()
+end
+
+function ET.RenameShoppingList(oldName, newName)
+    ET.EnsureShoppingLists()
+    local list = oldName and EbonTreeDB.shoppingLists[oldName] or nil
+    if not list then return nil end
+    newName = ET.ShoppingSafeName(newName)
+    if newName == oldName then return oldName end
+    newName = ET.UniqueShoppingName(newName)
+    EbonTreeDB.shoppingLists[oldName] = nil
+    list.name = newName
+    list.seeded = nil
+    EbonTreeDB.shoppingLists[newName] = list
+    if EbonTreeDB.activeShoppingList == oldName then EbonTreeDB.activeShoppingList = newName end
+    if ET.shoppingRun and ET.shoppingRun.listName == oldName then ET.shoppingRun.listName = newName end
+    ET.shoppingSelectedName = newName
+    ET.RefreshShoppingUI()
+    return newName
+end
+
+function ET.PromptShoppingName(mode)
+    ET.EnsureShoppingLists()
+    StaticPopupDialogs["CLEANTREE_SHOPPING_NAME"] = StaticPopupDialogs["CLEANTREE_SHOPPING_NAME"] or {
+        text = "Shopping List name:",
+        button1 = "Save",
+        button2 = "Cancel",
+        hasEditBox = 1,
+        maxLetters = 42,
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        OnAccept = function(self)
+            local value = self.editBox and self.editBox:GetText() or ""
+            if self.data == "rename" then
+                ET.RenameShoppingList(ET.shoppingSelectedName, value)
+            else
+                ET.CreateShoppingList(value, {})
+            end
+        end,
+        EditBoxOnEnterPressed = function(self)
+            local parent = self:GetParent()
+            if parent and parent.button1 then parent.button1:Click() end
+        end,
+        EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+    }
+    local popup = StaticPopup_Show("CLEANTREE_SHOPPING_NAME")
+    if popup and popup.editBox then
+        popup.data = mode
+        popup.editBox:SetText(mode == "rename" and tostring(ET.shoppingSelectedName or "") or "My Shopping List")
+        popup.editBox:HighlightText()
+        popup.editBox:SetFocus()
+    end
+end
+
+function ET.SelectedShoppingList()
+    ET.EnsureShoppingLists()
+    return EbonTreeDB.shoppingLists[ET.shoppingSelectedName]
+end
+
+function ET.SetActiveShoppingList(name)
+    ET.EnsureShoppingLists()
+    if EbonTreeDB.shoppingLists[name] then
+        EbonTreeDB.activeShoppingList = name
+        ET.shoppingSelectedName = name
+        setStatus("Active Shopping List: " .. tostring(name), 3)
+        ET.RefreshShoppingUI()
+    end
+end
+
+function ET.ShoppingEncodeID(id)
+    id = tonumber(id)
+    if not id or id < 0 or id >= (36 * 36) then return nil end
+    local alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local hi = math.floor(id / 36)
+    local lo = id % 36
+    return string.sub(alphabet, hi + 1, hi + 1) .. string.sub(alphabet, lo + 1, lo + 1)
+end
+
+function ET.ShoppingDecodeID(pair)
+    if type(pair) ~= "string" or string.len(pair) ~= 2 then return nil end
+    local alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    pair = string.upper(pair)
+    local a = string.find(alphabet, string.sub(pair, 1, 1), 1, true)
+    local b = string.find(alphabet, string.sub(pair, 2, 2), 1, true)
+    if not a or not b then return nil end
+    return (a - 1) * 36 + (b - 1)
+end
+
+function ET.ExportShoppingList(name)
+    ET.EnsureShoppingLists()
+    local list = EbonTreeDB.shoppingLists[name or ET.shoppingSelectedName]
+    if not list then return nil end
+    local ids = {}
+    for _, id in ipairs(list.entries or {}) do
+        local encoded = ET.ShoppingEncodeID(id)
+        if encoded then ids[#ids + 1] = encoded end
+    end
+    return ET.SHOPPING_EXPORT_VERSION .. ":" .. ET.ShoppingEncodeName(list.name or name or "Shopping List") .. ":" .. table.concat(ids, "")
+end
+
+function ET.ImportShoppingList(payload)
+    ET.EnsureShoppingLists()
+    payload = trim(payload or "")
+    local ver, encName, body = string.match(payload, "^([^:]+):([^:]*):(.*)$")
+    if ver ~= ET.SHOPPING_EXPORT_VERSION then return nil, "That is not a supported CleanTree Shopping List string." end
+    local name = ET.ShoppingSafeName(ET.ShoppingDecodeName(encName))
+    local entries, seen = {}, {}
+    if string.find(body or "", ",", 1, true) then
+        -- Early beta compatibility: accept the original decimal/comma body too.
+        for token in string.gmatch(body or "", "[^,]+") do
+            local id = tonumber(token)
+            if id and DATA.nodes and DATA.nodes[id] and not seen[id] then
+                entries[#entries + 1] = id
+                seen[id] = true
+            end
+        end
+    else
+        local i = 1
+        while i + 1 <= string.len(body or "") do
+            local id = ET.ShoppingDecodeID(string.sub(body, i, i + 1))
+            if id and DATA.nodes and DATA.nodes[id] and not seen[id] then
+                entries[#entries + 1] = id
+                seen[id] = true
+            end
+            i = i + 2
+        end
+    end
+    if #entries == 0 then return nil, "The Shopping List contained no recognized finite node IDs." end
+    name = ET.UniqueShoppingName(name)
+    EbonTreeDB.shoppingLists[name] = { name = name, entries = entries, imported = true }
+    ET.shoppingSelectedName = name
+    EbonTreeDB.activeShoppingList = name
+    ET.RefreshShoppingUI()
+    return name, nil
+end
+
+function ET.AppendMissingShoppingNodes()
+    local list = ET.SelectedShoppingList()
+    if not list then return end
+    local seen = {}
+    for _, id in ipairs(list.entries or {}) do seen[tonumber(id)] = true end
+    local added = 0
+    for _, id in ipairs(ET.ShoppingOrderedIDs(nil, false)) do
+        if not seen[id] then list.entries[#list.entries + 1] = id; seen[id] = true; added = added + 1 end
+    end
+    setStatus("Added " .. tostring(added) .. " missing finite nodes to the end of " .. tostring(list.name) .. ".", 4)
+    ET.RefreshShoppingUI()
+end
+
+function ET.AddShoppingNode(id)
+    local list = ET.SelectedShoppingList()
+    id = tonumber(id)
+    if not list or not id or not DATA.nodes[id] then return end
+    for index, existing in ipairs(list.entries or {}) do
+        if tonumber(existing) == id then
+            ET.shoppingEntryOffset = math.max(0, index - 1)
+            setStatus("That node is already priority #" .. tostring(index) .. "; jumped to it so you can move it.", 4)
+            ET.RefreshShoppingUI()
+            return
+        end
+    end
+    list.entries[#list.entries + 1] = id
+    setStatus("Added " .. tostring(DATA.nodes[id].name or id) .. " to " .. tostring(list.name) .. ".", 3)
+    ET.RefreshShoppingUI()
+end
+
+function ET.RemoveShoppingEntry(index)
+    local list = ET.SelectedShoppingList()
+    if list and list.entries and list.entries[index] then table.remove(list.entries, index); ET.RefreshShoppingUI() end
+end
+
+function ET.MoveShoppingEntry(index, destination)
+    local list = ET.SelectedShoppingList()
+    if not list or not list.entries or not list.entries[index] then return end
+    local count = #list.entries
+    local dest = tonumber(destination) or index
+    if dest < 1 then dest = 1 elseif dest > count then dest = count end
+    if dest == index then return end
+    local id = table.remove(list.entries, index)
+    table.insert(list.entries, dest, id)
+    ET.RefreshShoppingUI()
+end
+
+function ET.FindShoppingNodeByID(id)
+    id = tonumber(id)
+    if not id then return nil end
+    return liveNodes["node:" .. tostring(id)]
+end
+
+function ET.StopShoppingAuto(reason)
+    if ET.shoppingRun then ET.shoppingRun.active = false end
+    ET._shoppingResumeDelay = 0
+    if reason and reason ~= "" then setStatus(reason, 5) end
+    ET.RefreshShoppingUI()
+end
+
+function ET.FinishShoppingAuto(reason)
+    local run = ET.shoppingRun or {}
+    run.active = false
+    ET._shoppingResumeDelay = 0
+    local staged = tonumber(run.purchased) or 0
+    local spent = tonumber(run.spent) or 0
+    if staged > 0 then
+        -- Keep the in-window status deliberately short so it cannot wrap up
+        -- into the CleanTree title. The detailed stop reason still goes to chat.
+        setStatus("Auto-purchase staged " .. tostring(staged) .. " rank(s) for " .. formatNumber(spent) .. " Soul Ash. Review Cart, then APPLY CHANGES.", 12)
+        if reason and reason ~= "" then chat(reason) end
+        chat("Shopping List staged " .. tostring(staged) .. " purchase(s) for " .. formatNumber(spent) .. " Soul Ash. Apply Changes is waiting on you.")
+    else
+        setStatus("No Shopping List purchases are available right now.", 8)
+        if reason and reason ~= "" then chat(reason) end
+    end
+    ET.RefreshShoppingUI()
+end
+
+function ET.ContinueShoppingAuto()
+    local run = ET.shoppingRun
+    if not run or not run.active or pendingClick then return end
+    ET.EnsureShoppingLists()
+    local list = EbonTreeDB.shoppingLists[run.listName]
+    if not list then ET.FinishShoppingAuto("The active Shopping List no longer exists."); return end
+    if not next(liveNodes) then buildKnownNodes(); ET.BuildTreeOrderCache() end
+
+    local ash = readSoulAsh()
+    if not ash then ET.FinishShoppingAuto("Could not read live Soul Ash; auto-purchase stopped."); return end
+
+    local locked, expensive, owned, missing = 0, 0, 0, 0
+    for index, id in ipairs(list.entries or {}) do
+        local node = ET.FindShoppingNodeByID(id)
+        if not node then
+            missing = missing + 1
+        else
+            ensureNodeBound(node)
+            syncNodeOwnership(node)
+            if node.fullyOwned then
+                owned = owned + 1
+            elseif not node.button then
+                missing = missing + 1
+            else
+                local available = nodeStructuralAvailability(node)
+                local cost = nodeCost(node)
+                if not available then
+                    locked = locked + 1
+                elseif not cost then
+                    missing = missing + 1
+                elseif ash < cost then
+                    expensive = expensive + 1
+                else
+                    run.currentIndex = index
+                    run.currentID = id
+                    stageNode(node, true)
+                    if pendingClick then
+                        pendingClick.shoppingListIndex = index
+                        pendingClick.shoppingListName = run.listName
+                        ET.RefreshShoppingUI()
+                        return
+                    end
+                    -- If the click could not even be sent, continue scanning.
+                end
+            end
+        end
+    end
+
+    local detail = "No additional purchases are available from this Shopping List right now."
+    if expensive > 0 then detail = detail .. " " .. tostring(expensive) .. " higher/lower priority item(s) need more Soul Ash." end
+    if locked > 0 then detail = detail .. " " .. tostring(locked) .. " item(s) are still prerequisite-locked." end
+    if missing > 0 then detail = detail .. " " .. tostring(missing) .. " item(s) are not currently bound." end
+    ET.FinishShoppingAuto(detail)
+end
+
+function ET.StartShoppingAuto(name)
+    ET.EnsureShoppingLists()
+    if pendingClick then setStatus("Wait for the current node action to finish before starting Shopping List auto-purchase.", 5); return end
+    name = name or ET.shoppingSelectedName or EbonTreeDB.activeShoppingList
+    local list = EbonTreeDB.shoppingLists[name]
+    if not list then setStatus("Select a Shopping List first.", 4); return end
+    if #(list.entries or {}) == 0 then setStatus("That Shopping List is empty.", 4); return end
+    EbonTreeDB.activeShoppingList = name
+    ET.shoppingSelectedName = name
+    ET.shoppingRun = { active = true, listName = name, purchased = 0, spent = 0, started = (GetTime and GetTime()) or 0 }
+    setStatus("Auto-purchasing " .. tostring(name) .. ". Purchases are staged; Apply remains manual.", 5)
+    ET.RefreshShoppingUI()
+    ET.ContinueShoppingAuto()
+end
+
+function ET.ShoppingSearch(term)
+    term = lower(trim(term or ""))
+    ET.shoppingSearchResults = {}
+    if term == "" then return end
+    local ordered = ET.ShoppingOrderedIDs(nil, false)
+    for _, id in ipairs(ordered) do
+        local def = DATA.nodes[id]
+        local name = def and def.name or ("Node " .. tostring(id))
+        if string.find(lower(name), term, 1, true) or tostring(id) == term then
+            ET.shoppingSearchResults[#ET.shoppingSearchResults + 1] = id
+        end
+    end
+end
+
+function ET.RefreshShoppingSearchRows()
+    for i, row in ipairs(ET.shoppingSearchRows or {}) do
+        local id = ET.shoppingSearchResults[(ET.shoppingSearchOffset or 0) + i]
+        if id then
+            local def = DATA.nodes[id] or {}
+            row.nodeID = id
+            row.text:SetText(tostring(id) .. "  |cffffd200" .. tostring(def.name or "Node") .. "|r  |cff888888" .. tostring(ET.ShoppingCategoryByID(id)) .. "|r")
+            row.add:Enable()
+            row:Show()
+        else
+            row.nodeID = nil
+            row:Hide()
+        end
+    end
+end
+
+function ET.RefreshShoppingUI()
+    if not ET.shoppingFrame then return end
+    ET.EnsureShoppingLists()
+    local names = ET.ShoppingListNames()
+    ET.shoppingVisibleNames = names
+    for i, row in ipairs(ET.shoppingListRows or {}) do
+        local name = names[i]
+        if name then
+            row.listName = name
+            local active = name == EbonTreeDB.activeShoppingList
+            local selected = name == ET.shoppingSelectedName
+            row.text:SetText((active and "|cff33ff33* |r" or "  ") .. (selected and "|cffffd200" or "|cffffffff") .. name .. "|r")
+            row:Show()
+        else row.listName = nil; row:Hide() end
+    end
+    local list = ET.SelectedShoppingList()
+    if ET.shoppingTitleText then
+        ET.shoppingTitleText:SetText(list and ("Shopping List: |cffffd200" .. tostring(list.name) .. "|r") or "Shopping List")
+    end
+    if ET.shoppingActiveText then ET.shoppingActiveText:SetText("Active: |cff33ff33" .. tostring(EbonTreeDB.activeShoppingList or "none") .. "|r") end
+    if ET.shoppingCountText then ET.shoppingCountText:SetText(list and (tostring(#(list.entries or {})) .. " finite nodes") or "0 finite nodes") end
+
+    ET.shoppingEntryOffset = ET.shoppingEntryOffset or 0
+    local entries = list and list.entries or {}
+    local maxOffset = math.max(0, #entries - #(ET.shoppingEntryRows or {}))
+    if ET.shoppingEntryOffset > maxOffset then ET.shoppingEntryOffset = maxOffset end
+    for i, row in ipairs(ET.shoppingEntryRows or {}) do
+        local index = ET.shoppingEntryOffset + i
+        local id = entries[index]
+        if id then
+            local def = DATA.nodes[id] or {}
+            row.entryIndex = index
+            row.idText:SetText("#" .. tostring(index))
+            row.nameText:SetText(tostring(id) .. "  |cffffd200" .. tostring(def.name or "Node") .. "|r")
+            row.metaText:SetText(tostring(ET.ShoppingCategoryByID(id)) .. "  •  " .. formatNumber(ET.ShoppingNodeCostByID(id)) .. " Ash")
+            row:Show()
+        else row.entryIndex = nil; row:Hide() end
+    end
+    if ET.shoppingAutoButton then
+        if ET.shoppingRun and ET.shoppingRun.active then
+            ET.shoppingAutoButton:SetText("STOP AUTO-PURCHASE")
+        else
+            ET.shoppingAutoButton:SetText("AUTO-PURCHASE THIS LIST")
+        end
+    end
+    if ET.shoppingRunText then
+        if ET.shoppingRun and ET.shoppingRun.active then
+            ET.shoppingRunText:SetText("|cff33ff33Running|r • staged " .. tostring(ET.shoppingRun.purchased or 0) .. " • spent " .. formatNumber(ET.shoppingRun.spent or 0))
+        else
+            ET.shoppingRunText:SetText("Stages purchases only. |cffffd200You still click APPLY CHANGES.|r")
+        end
+    end
+    ET.RefreshShoppingSearchRows()
+end
+
+function ET.ShowShoppingTransfer(mode)
+    ET.EnsureShoppingLists()
+    local transferParent = UIParent
+    if not ET.shoppingTransferFrame then
+        local f = CreateFrame("Frame", "CleanTreeShoppingTransferFrame", transferParent)
+        f:SetWidth(720); f:SetHeight(430); f:SetPoint("CENTER", transferParent, "CENTER", 0, 0); f:EnableMouse(true)
+        ET.SyncShoppingFrameLayer(f, transferParent, 40)
+        ET.SetShoppingBackdrop(f, ET.SHOP_COLORS.PANEL)
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"); title:SetPoint("TOPLEFT", 18, -16); f.title = title
+        local hint = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8); hint:SetWidth(675); hint:SetJustifyH("LEFT"); f.hint = hint
+        local fieldLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal"); fieldLabel:SetPoint("TOPLEFT", 18, -74); fieldLabel:SetText("|cffffd200Paste here:|r"); f.fieldLabel = fieldLabel
+        local close = makeButton(f, "Close", 80, 26); ET.SetShoppingLevel(close, 44); close:SetPoint("BOTTOMRIGHT", -14, 14); close:SetScript("OnClick", function() f:Hide() end)
+        local action = makeButton(f, "Import", 92, 26); ET.SetShoppingLevel(action, 44); action:SetPoint("RIGHT", close, "LEFT", -8, 0); f.action = action
+
+        -- Give the multiline edit area an unmistakable black input well. The
+        -- frame is visual-only so it can never intercept mouse clicks.
+        local inputWell = CreateFrame("Frame", nil, f)
+        inputWell:SetPoint("TOPLEFT", 14, -94); inputWell:SetPoint("BOTTOMRIGHT", -36, 50)
+        inputWell:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 12,
+            insets = {left=3, right=3, top=3, bottom=3},
+        })
+        inputWell:SetBackdropColor(unpack(ET.SHOP_COLORS.INPUT))
+        inputWell:SetBackdropBorderColor(0.42, 0.42, 0.46, 1)
+        if inputWell.SetFrameStrata then inputWell:SetFrameStrata("FULLSCREEN_DIALOG") end
+        if inputWell.SetFrameLevel then inputWell:SetFrameLevel(41) end
+        if inputWell.EnableMouse then inputWell:EnableMouse(false) end
+        f.inputWell = inputWell
+
+        local scroll = CreateFrame("ScrollFrame", "CleanTreeShoppingTransferScroll", f, "UIPanelScrollFrameTemplate")
+        ET.SetShoppingLevel(scroll, 42)
+        scroll:SetPoint("TOPLEFT", 22, -102); scroll:SetPoint("BOTTOMRIGHT", -48, 58)
+        local edit = CreateFrame("EditBox", "CleanTreeShoppingTransferEdit", scroll)
+        ET.SetShoppingLevel(edit, 43)
+        edit:SetMultiLine(true); edit:SetAutoFocus(false); edit:SetFontObject(ChatFontNormal); edit:SetWidth(625); edit:SetHeight(280); edit:SetTextInsets(6,6,6,6)
+        if edit.SetTextColor then edit:SetTextColor(0.96, 0.96, 0.96) end
+        if edit.SetJustifyH then edit:SetJustifyH("LEFT") end
+        if edit.SetJustifyV then edit:SetJustifyV("TOP") end
+        edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        scroll:SetScrollChild(edit); f.edit = edit
+        ET.shoppingTransferFrame = f
+    end
+    local f = ET.shoppingTransferFrame
+    local transferParent = UIParent
+    ET.SyncShoppingFrameLayer(f, transferParent, 40)
+    f:ClearAllPoints()
+    f:SetPoint("CENTER", transferParent, "CENTER", 0, 0)
+    f.mode = mode
+    if mode == "export" then
+        local payload = ET.ExportShoppingList(ET.shoppingSelectedName) or ""
+        f.title:SetText("Export Shopping List")
+        f.hint:SetText("Copy this entire single string and send it to another CleanTree user. The string contains the list name and exact ordered node IDs.")
+        if f.fieldLabel then f.fieldLabel:SetText("|cffffd200Share string:|r") end
+        f.edit:SetText(payload); f.edit:HighlightText(); f.edit:SetFocus()
+        f.action:SetText("Select All")
+        f.action:SetScript("OnClick", function() f.edit:SetFocus(); f.edit:HighlightText() end)
+    else
+        f.title:SetText("Import Shopping List")
+        f.hint:SetText("Paste a CTSL1 Shopping List string into the clearly marked box below, then click Import. It will be saved as a new list and selected immediately.")
+        if f.fieldLabel then f.fieldLabel:SetText("|cffffd200Paste CTSL1 string here:|r") end
+        f.edit:SetText(""); f.edit:SetFocus()
+        if f.edit.SetCursorPosition then f.edit:SetCursorPosition(0) end
+        f.action:SetText("Import")
+        f.action:SetScript("OnClick", function()
+            local name, err = ET.ImportShoppingList(f.edit:GetText() or "")
+            if name then
+                setStatus("Imported Shopping List: " .. tostring(name), 5)
+                chat("Imported Shopping List '" .. tostring(name) .. "'.")
+                f:Hide()
+            else
+                setStatus(err or "Shopping List import failed.", 7)
+            end
+        end)
+    end
+    f:Show()
+end
+
+function ET.OpenShoppingLists()
+    ET.EnsureShoppingLists()
+    if not mainFrame or not mainFrame:IsShown() then return end
+    if ET.shoppingFrame then
+        ET.SyncShoppingFrameLayer(ET.shoppingFrame, UIParent, 10)
+        ET.shoppingFrame:ClearAllPoints()
+        ET.shoppingFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        ET.shoppingFrame:Show()
+        if ET.shoppingFrame.Raise then ET.shoppingFrame:Raise() end
+        ET.RefreshShoppingUI()
+        return
+    end
+    local f = CreateFrame("Frame", "CleanTreeShoppingFrame", UIParent)
+    f:SetWidth(960); f:SetHeight(680); f:SetPoint("CENTER", UIParent, "CENTER", 0, 0); f:EnableMouse(true); f:SetMovable(true); f:RegisterForDrag("LeftButton")
+    ET.SyncShoppingFrameLayer(f, UIParent, 10)
+    f:SetScript("OnShow", function(self) ET.SyncShoppingFrameLayer(self, UIParent, 10); if self.Raise then self:Raise() end end)
+    f:SetScript("OnHide", function() if ET.shoppingTransferFrame then ET.shoppingTransferFrame:Hide() end end)
+    f:SetScript("OnDragStart", function(self) self:StartMoving() end); f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    ET.SetShoppingBackdrop(f, ET.SHOP_COLORS.BG)
+    ET.shoppingFrame = f
+
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"); title:SetPoint("TOPLEFT", 18, -14); title:SetText("|cffffd200CleanTree Shopping Lists|r")
+    local subtitle = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -5); subtitle:SetWidth(760); subtitle:SetJustifyH("LEFT"); subtitle:SetTextColor(1, 1, 1, 1); subtitle:SetText("Exact node priority lists. Locked or unaffordable entries are skipped temporarily; priority #1 is rechecked after every successful purchase.")
+    local close = makeButton(f, "X", 28, 24); ET.SetShoppingLevel(close, 20); close:SetPoint("TOPRIGHT", -12, -12); close:SetScript("OnClick", function() f:Hide() end)
+
+    local left = CreateFrame("Frame", nil, f); left:SetPoint("TOPLEFT", 14, -72); left:SetPoint("BOTTOMLEFT", 14, 14); left:SetWidth(220); ET.SetShoppingBackdrop(left, ET.SHOP_COLORS.PANEL); ET.SetShoppingLevel(left, 12)
+    local lh = left:CreateFontString(nil, "OVERLAY", "GameFontNormal"); lh:SetPoint("TOPLEFT", 12, -10); lh:SetText("Saved Lists")
+    for i=1,12 do
+        local row = CreateFrame("Button", nil, left); ET.SetShoppingLevel(row, 14); row:SetHeight(28); row:SetPoint("TOPLEFT", 8, -34-((i-1)*29)); row:SetPoint("TOPRIGHT", -8, -34-((i-1)*29))
+        row.text = row:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); row.text:SetAllPoints(); row.text:SetJustifyH("LEFT")
+        row:SetScript("OnClick", function(self) if self.listName then ET.shoppingSelectedName=self.listName; ET.shoppingEntryOffset=0; ET.RefreshShoppingUI() end end)
+        ET.shoppingListRows[i]=row
+    end
+    local newBtn = makeButton(left,"New",46,24); ET.SetShoppingLevel(newBtn, 16); newBtn:SetPoint("BOTTOMLEFT",8,10); newBtn:SetScript("OnClick",function() ET.PromptShoppingName("new") end)
+    local copyBtn = makeButton(left,"Copy",46,24); ET.SetShoppingLevel(copyBtn, 16); copyBtn:SetPoint("LEFT",newBtn,"RIGHT",4,0); copyBtn:SetScript("OnClick",function() local l=ET.SelectedShoppingList(); if l then ET.CreateShoppingList((l.name or "List").." Copy",l.entries) end end)
+    local renameBtn = makeButton(left,"Name",46,24); ET.SetShoppingLevel(renameBtn, 16); renameBtn:SetPoint("LEFT",copyBtn,"RIGHT",4,0); renameBtn:SetScript("OnClick",function() ET.PromptShoppingName("rename") end)
+    local delBtn = makeButton(left,"Del",40,24); ET.SetShoppingLevel(delBtn, 16); delBtn:SetPoint("LEFT",renameBtn,"RIGHT",4,0); delBtn:SetScript("OnClick",function() ET.DeleteShoppingList(ET.shoppingSelectedName) end)
+
+    local right = CreateFrame("Frame", nil, f); right:SetPoint("TOPLEFT", left, "TOPRIGHT", 10, 0); right:SetPoint("BOTTOMRIGHT", -14, 14); ET.SetShoppingBackdrop(right, ET.SHOP_COLORS.PANEL); ET.SetShoppingLevel(right, 12)
+    ET.shoppingTitleText = right:CreateFontString(nil,"OVERLAY","GameFontNormalLarge"); ET.shoppingTitleText:SetPoint("TOPLEFT",14,-12)
+    ET.shoppingActiveText = right:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); ET.shoppingActiveText:SetPoint("TOPLEFT",ET.shoppingTitleText,"BOTTOMLEFT",0,-4)
+    ET.shoppingCountText = right:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); ET.shoppingCountText:SetPoint("TOPRIGHT",-14,-16); ET.shoppingCountText:SetJustifyH("RIGHT")
+
+    local useBtn=makeButton(right,"Use This List",100,24); ET.SetShoppingLevel(useBtn, 16); useBtn:SetPoint("TOPLEFT",14,-58); useBtn:SetScript("OnClick",function() ET.SetActiveShoppingList(ET.shoppingSelectedName) end)
+    local appendBtn=makeButton(right,"Append Missing",112,24); ET.SetShoppingLevel(appendBtn, 16); appendBtn:SetPoint("LEFT",useBtn,"RIGHT",6,0); appendBtn:SetScript("OnClick",ET.AppendMissingShoppingNodes)
+    local exportBtn=makeButton(right,"Export",72,24); ET.SetShoppingLevel(exportBtn, 16); exportBtn:SetPoint("LEFT",appendBtn,"RIGHT",6,0); exportBtn:SetScript("OnClick",function() ET.ShowShoppingTransfer("export") end)
+    local importBtn=makeButton(right,"Import",72,24); ET.SetShoppingLevel(importBtn, 16); importBtn:SetPoint("LEFT",exportBtn,"RIGHT",6,0); importBtn:SetScript("OnClick",function() ET.ShowShoppingTransfer("import") end)
+
+    ET.shoppingAutoButton=makeButton(right,"AUTO-PURCHASE THIS LIST",190,28); ET.SetShoppingLevel(ET.shoppingAutoButton, 16); ET.shoppingAutoButton:SetPoint("TOPRIGHT",-14,-54)
+    ET.shoppingAutoButton:SetScript("OnClick",function()
+        if ET.shoppingRun and ET.shoppingRun.active then ET.StopShoppingAuto("Shopping List auto-purchase stopped by user.") else ET.StartShoppingAuto(ET.shoppingSelectedName) end
+    end)
+    ET.shoppingRunText=right:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); ET.shoppingRunText:SetPoint("TOPRIGHT",-14,-88); ET.shoppingRunText:SetWidth(300); ET.shoppingRunText:SetJustifyH("RIGHT")
+
+    local listPanel=CreateFrame("Frame",nil,right); listPanel:SetPoint("TOPLEFT",14,-116); listPanel:SetPoint("TOPRIGHT",-14,-116); listPanel:SetHeight(310); ET.SetShoppingBackdrop(listPanel,ET.SHOP_COLORS.PANEL2); ET.SetShoppingLevel(listPanel, 14)
+    local listHdr=listPanel:CreateFontString(nil,"OVERLAY","GameFontNormal"); listHdr:SetPoint("TOPLEFT",10,-8); listHdr:SetText("Purchase Priority")
+    local listHint=listPanel:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); listHint:SetPoint("TOPRIGHT",-10,-9); listHint:SetText("Top = highest priority")
+
+    for i=1,6 do
+        local row=CreateFrame("Frame",nil,listPanel); row:SetHeight(38); row:SetPoint("TOPLEFT",8,-32-((i-1)*40)); row:SetPoint("TOPRIGHT",-8,-32-((i-1)*40)); ET.SetShoppingBackdrop(row,i%2==0 and ET.SHOP_COLORS.ROW_A or ET.SHOP_COLORS.ROW_B); ET.SetShoppingLevel(row, 16)
+        row.idText=row:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); row.idText:SetPoint("LEFT",8,7); row.idText:SetWidth(38); row.idText:SetJustifyH("LEFT")
+        row.nameText=row:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); row.nameText:SetPoint("LEFT",48,7); row.nameText:SetWidth(300); row.nameText:SetJustifyH("LEFT")
+        row.metaText=row:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); row.metaText:SetPoint("LEFT",48,-8); row.metaText:SetWidth(260); row.metaText:SetJustifyH("LEFT"); row.metaText:SetTextColor(0.82, 0.78, 0.64, 1)
+        row.top=makeButton(row,"Top",38,22); ET.SetShoppingLevel(row.top, 18); row.top:SetPoint("RIGHT",-164,0); row.top:SetScript("OnClick",function() if row.entryIndex then ET.MoveShoppingEntry(row.entryIndex,1) end end)
+        row.up=makeButton(row,"Up",28,22); ET.SetShoppingLevel(row.up, 18); row.up:SetPoint("RIGHT",-132,0); row.up:SetScript("OnClick",function() if row.entryIndex then ET.MoveShoppingEntry(row.entryIndex,row.entryIndex-1) end end)
+        row.down=makeButton(row,"Dn",28,22); ET.SetShoppingLevel(row.down, 18); row.down:SetPoint("RIGHT",-100,0); row.down:SetScript("OnClick",function() if row.entryIndex then ET.MoveShoppingEntry(row.entryIndex,row.entryIndex+1) end end)
+        row.bottom=makeButton(row,"Bot",38,22); ET.SetShoppingLevel(row.bottom, 18); row.bottom:SetPoint("RIGHT",-58,0); row.bottom:SetScript("OnClick",function() local l=ET.SelectedShoppingList(); if row.entryIndex and l then ET.MoveShoppingEntry(row.entryIndex,#l.entries) end end)
+        row.remove=makeButton(row,"X",28,22); ET.SetShoppingLevel(row.remove, 18); row.remove:SetPoint("RIGHT",-8,0); row.remove:SetScript("OnClick",function() if row.entryIndex then ET.RemoveShoppingEntry(row.entryIndex) end end)
+        ET.shoppingEntryRows[i]=row
+    end
+    local upPage=makeButton(listPanel,"Page Up",68,22); ET.SetShoppingLevel(upPage, 18); upPage:SetPoint("BOTTOMLEFT",8,8); upPage:SetScript("OnClick",function() ET.shoppingEntryOffset=math.max(0,(ET.shoppingEntryOffset or 0)-6); ET.RefreshShoppingUI() end)
+    local downPage=makeButton(listPanel,"Page Dn",68,22); ET.SetShoppingLevel(downPage, 18); downPage:SetPoint("LEFT",upPage,"RIGHT",6,0); downPage:SetScript("OnClick",function() ET.shoppingEntryOffset=(ET.shoppingEntryOffset or 0)+6; ET.RefreshShoppingUI() end)
+
+    local addPanel=CreateFrame("Frame",nil,right); addPanel:SetPoint("TOPLEFT",listPanel,"BOTTOMLEFT",0,-8); addPanel:SetPoint("BOTTOMRIGHT",-14,10); ET.SetShoppingBackdrop(addPanel,ET.SHOP_COLORS.PANEL2); ET.SetShoppingLevel(addPanel, 14)
+    local addHdr=addPanel:CreateFontString(nil,"OVERLAY","GameFontNormal"); addHdr:SetPoint("TOPLEFT",10,-9); addHdr:SetText("Add Node")
+    local search=CreateFrame("EditBox","CleanTreeShoppingSearch",addPanel,"InputBoxTemplate"); ET.SetShoppingLevel(search, 18); search:SetHeight(24); search:SetPoint("TOPLEFT",80,-6); search:SetPoint("TOPRIGHT",-10,-6); search:SetAutoFocus(false)
+    search:SetScript("OnTextChanged",function(self) ET.shoppingSearchOffset=0; ET.ShoppingSearch(self:GetText() or ""); ET.RefreshShoppingSearchRows() end)
+    search:SetScript("OnEscapePressed",function(self) self:ClearFocus() end)
+    for i=1,3 do
+        local row=CreateFrame("Frame",nil,addPanel); ET.SetShoppingLevel(row, 16); row:SetHeight(30); row:SetPoint("TOPLEFT",10,-40-((i-1)*31)); row:SetPoint("TOPRIGHT",-10,-40-((i-1)*31))
+        row.text=row:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); row.text:SetPoint("LEFT",4,0); row.text:SetPoint("RIGHT",-64,0); row.text:SetJustifyH("LEFT")
+        row.add=makeButton(row,"Add",52,22); ET.SetShoppingLevel(row.add, 18); row.add:SetPoint("RIGHT",-2,0); row.add:SetScript("OnClick",function() if row.nodeID then ET.AddShoppingNode(row.nodeID) end end)
+        ET.shoppingSearchRows[i]=row
+    end
+    local prev=makeButton(addPanel,"Prev",52,22); ET.SetShoppingLevel(prev, 18); prev:SetPoint("BOTTOMLEFT",10,8); prev:SetScript("OnClick",function() ET.shoppingSearchOffset=math.max(0,(ET.shoppingSearchOffset or 0)-3); ET.RefreshShoppingSearchRows() end)
+    local nextb=makeButton(addPanel,"Next",52,22); ET.SetShoppingLevel(nextb, 18); nextb:SetPoint("LEFT",prev,"RIGHT",6,0); nextb:SetScript("OnClick",function() if (ET.shoppingSearchOffset or 0)+3 < #(ET.shoppingSearchResults or {}) then ET.shoppingSearchOffset=(ET.shoppingSearchOffset or 0)+3; ET.RefreshShoppingSearchRows() end end)
+
+    ET.RefreshShoppingUI()
+    f:Show()
 end
 
 local function createRow(parent, index)
@@ -3299,6 +4100,7 @@ end
 
 function ET.RestoreNativeSkillTree()
     EbonTreeDB.nativeMode = true
+    ET.HideShoppingUI()
     if mainFrame and mainFrame:IsShown() then mainFrame:Hide() end
     restoreNativeVisuals()
     local button = ET.EnsureNativeRestoreButton()
@@ -3310,6 +4112,14 @@ local function dockToNativeTree()
     if not mainFrame then return false end
     local native = _G.skillTreeFrame
     if not native then return false end
+
+    -- Shopping Lists must disappear when the native Skill Tree/Progression
+    -- window is dismissed even if CleanTree itself remains logically shown.
+    -- HookScript preserves Ebonhold's own lifecycle handler.
+    if not ET._shoppingLifecycleHooked and native.HookScript then
+        local ok = pcall(native.HookScript, native, "OnHide", function() ET.HideShoppingUI() end)
+        if ok then ET._shoppingLifecycleHooked = true end
+    end
 
     -- Hotfix28: skillTreeFrame includes more than the drawable viewport.  The
     -- /fstack dump shows skillTreeScroll directly above it, with skillTreeCanvas
@@ -3415,7 +4225,6 @@ local function createUI()
 
     scanText = header:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     scanText:SetPoint("BOTTOMLEFT", 16, 11)
-    scanText:SetWidth(330)
     scanText:SetJustifyH("LEFT")
 
     refreshButton = makeButton(header, "Refresh", 82, 24)
@@ -3434,6 +4243,31 @@ local function createUI()
         ET.RestoreNativeSkillTree()
     end)
 
+    ET.shoppingButton = makeButton(header, "Shopping Lists", 110, 24)
+    ET.shoppingButton:SetPoint("RIGHT", ET.restoreNativeButton, "LEFT", -8, 0)
+    ET.shoppingButton:SetScript("OnClick", function() ET.OpenShoppingLists() end)
+
+    ET.buyableButton = makeButton(header, "Buyable Now", 104, 24)
+    ET.buyableButton:SetPoint("RIGHT", ET.shoppingButton, "LEFT", -8, 0)
+    -- Let the status line use all free header space up to the first action
+    -- button. Short Shopping List status messages then stay clear of the title.
+    scanText:SetPoint("BOTTOMRIGHT", ET.buyableButton, "BOTTOMLEFT", -12, 3)
+
+    ET.buyableButton:SetScript("OnClick", function()
+        selectedCategory = "BUYABLE"
+        for _, tb in pairs(tabButtons) do tb:UnlockHighlight() end
+        ET.buyableButton:LockHighlight()
+        rebuildFiltered()
+        resetScrollTop()
+        refreshRows()
+        local count = #filteredNodes
+        if count == 1 then
+            setStatus("Showing the 1 node you can afford and purchase right now.", 4)
+        else
+            setStatus("Showing " .. tostring(count) .. " nodes you can afford and purchase right now.", 4)
+        end
+    end)
+
 
     local tabs = CreateFrame("Frame", nil, mainFrame)
     tabs:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, -8)
@@ -3450,6 +4284,7 @@ local function createUI()
         x = x + 92
         b:SetScript("OnClick", function()
             selectedCategory = key
+            if ET.buyableButton then ET.buyableButton:UnlockHighlight() end
             for k, tb in pairs(tabButtons) do
                 if k == key then tb:LockHighlight() else tb:UnlockHighlight() end
             end
@@ -3596,6 +4431,7 @@ local function createUI()
         if not (ET.IsInitialLoading and ET.IsInitialLoading()) then refreshRows() end
     end)
     mainFrame:SetScript("OnHide", function()
+        ET.HideShoppingUI()
         restoreNativeVisuals()
     end)
 end
@@ -4155,6 +4991,27 @@ function ET.APIProbe()
     end
 end
 
+function ET.ShoppingProbe()
+    local function frameInfo(label, frame)
+        if not frame then chat(label .. " = nil"); return end
+        local name = frame.GetName and frame:GetName() or "<unnamed>"
+        local objectType = frame.GetObjectType and frame:GetObjectType() or "?"
+        local strata = frame.GetFrameStrata and frame:GetFrameStrata() or "?"
+        local level = frame.GetFrameLevel and frame:GetFrameLevel() or "?"
+        local parent = frame.GetParent and frame:GetParent() or nil
+        local parentName = parent and parent.GetName and parent:GetName() or tostring(parent)
+        chat(label .. " name=" .. tostring(name) .. " type=" .. tostring(objectType) .. " strata=" .. tostring(strata) .. " level=" .. tostring(level) .. " parent=" .. tostring(parentName))
+    end
+    frameInfo("Shopping", ET.shoppingFrame)
+    frameInfo("Transfer", ET.shoppingTransferFrame)
+    if type(GetMouseFocus) == "function" then
+        local ok, focus = pcall(GetMouseFocus)
+        if ok then frameInfo("MouseFocus", focus) else chat("MouseFocus probe failed: " .. tostring(focus)) end
+    else
+        chat("GetMouseFocus is unavailable on this client.")
+    end
+end
+
 local function slash(msg)
     local raw = trim(msg or "")
     local cmd, arg = string.match(raw, "^(%S+)%s*(.-)$")
@@ -4190,13 +5047,27 @@ local function slash(msg)
                 discoverRuntimeNodes()
             end
             probe()
+        elseif cmd == "shopping" or cmd == "shop" or cmd == "lists" then
+            ET.OpenShoppingLists()
+        elseif cmd == "shoppingprobe" or cmd == "shopprobe" then
+            ET.ShoppingProbe()
+        elseif cmd == "shopauto" then
+            ET.StartShoppingAuto(ET.shoppingSelectedName or EbonTreeDB.activeShoppingList)
+        elseif cmd == "shopstop" then
+            ET.StopShoppingAuto("Shopping List auto-purchase stopped by user.")
+        elseif cmd == "shopimport" and arg ~= "" then
+            local name, importErr = ET.ImportShoppingList(arg)
+            if name then chat("Imported Shopping List '" .. tostring(name) .. "'.") else chat(importErr or "Import failed.") end
+        elseif cmd == "shopexport" then
+            local payload = ET.ExportShoppingList(ET.shoppingSelectedName or EbonTreeDB.activeShoppingList)
+            if payload then chat("Open Shopping Lists -> Export to copy the full string. Length=" .. tostring(string.len(payload))) end
         elseif cmd == "auto" then
             EbonTreeDB.autoOpen = not (EbonTreeDB.autoOpen ~= false)
             chat("Auto-open is now " .. (EbonTreeDB.autoOpen ~= false and "ON" or "OFF") .. ".")
         elseif cmd == "apply" then
             applyChanges()
         else
-            chat("Commands: /cleantree, show, native, refresh, probe, apiprobe, frameprobe, orderprobe, nodeprobe <name>, graphprobe <name>, auto, apply")
+            chat("Commands: /cleantree, show, native, refresh, shopping, shoppingprobe, shopauto, shopstop, probe, apiprobe, frameprobe, orderprobe, nodeprobe <name>, graphprobe <name>, auto, apply")
         end
     end)
 
@@ -4220,6 +5091,7 @@ ET:SetScript("OnEvent", function(self, event, arg1)
             if type(EbonTreeDB) ~= "table" then EbonTreeDB = {} end
             if EbonTreeDB.autoOpen == nil then EbonTreeDB.autoOpen = true end
             if EbonTreeDB.nativeMode == nil then EbonTreeDB.nativeMode = false end
+            ET.EnsureShoppingLists()
             createUI()
             installTooltipHook()
         end
@@ -4245,6 +5117,14 @@ ET:SetScript("OnUpdate", function(self, elapsed)
     -- Ebonhold may create the Skill Tree lazily after login.
     if not treeHooked then hookNativeTree() end
     if not applyHooked then installApplyHook() end
+
+    if ET.shoppingRun and ET.shoppingRun.active and not pendingClick then
+        if (ET._shoppingResumeDelay or 0) > 0 then
+            ET._shoppingResumeDelay = math.max(0, (ET._shoppingResumeDelay or 0) - elapsed)
+        else
+            ET.ContinueShoppingAuto()
+        end
+    end
 
     -- In persistent native mode, Ebonhold can lazily recreate/reparent its tree
     -- widgets. Re-anchor the tiny return button occasionally so there is always
@@ -4437,11 +5317,14 @@ ET:SetScript("OnUpdate", function(self, elapsed)
         elseif after and pendingClick.beforeAsh and after < pendingClick.beforeAsh then
             finishPendingClick(after)
         elseif after and pendingClick.beforeAsh and after > pendingClick.beforeAsh then
+            local wasShoppingAuto = pendingClick.shoppingAuto
             pendingClick = nil
-            setStatus("Soul Ash increased unexpectedly; purchase was not tracked.", 6)
+            if wasShoppingAuto then ET.StopShoppingAuto("Soul Ash increased unexpectedly; Shopping List auto-purchase stopped.")
+            else setStatus("Soul Ash increased unexpectedly; purchase was not tracked.", 6) end
             refreshRows()
         elseif pendingClick.elapsed > 0.90 then
             local rejectedNode = pendingClick.node
+            local wasShoppingAuto = pendingClick.shoppingAuto
             pendingClick = nil
             if rejectedNode then
                 -- Ebonhold is authoritative. A click with no Soul Ash decrease
@@ -4453,6 +5336,7 @@ ET:SetScript("OnUpdate", function(self, elapsed)
             clearTreeCaches()
             refreshRows()
             if rejectedNode then refreshDetail(rejectedNode) end
+            if wasShoppingAuto and ET.shoppingRun and ET.shoppingRun.active then ET._shoppingResumeDelay = 0.08 end
         end
     end
 
