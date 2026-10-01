@@ -5649,6 +5649,46 @@ function ET.APIProbe()
     end
 end
 
+function ET.DamageProbe()
+    ET.RefreshPlayerDamagePreference()
+    ET.BuildDamageBranchMap()
+    local map = ET.damageBranchMap or {}
+    local counts = map.counts or {}
+    chat("CleanTree Damage: class=" .. tostring(ET.damageClassToken or "?") ..
+        " spec=" .. tostring(ET.damageSpecName or "?") ..
+        " tab=" .. tostring(ET.damageSpecIndex or "ambiguous") ..
+        " group=" .. tostring(ET.damageTalentGroup or "?") ..
+        " preference=" .. tostring(ET.damagePreference or "ALL"))
+    chat("Damage classification: valid=" .. tostring(map.valid == true) ..
+        " root=" .. tostring(counts.ROOT or 0) ..
+        " general=" .. tostring(counts.GENERAL or 0) ..
+        " physical=" .. tostring(counts.PHYSICAL or 0) ..
+        " spell=" .. tostring(counts.SPELL or 0) ..
+        " mixed=" .. tostring(counts.MIXED or 0) ..
+        " unknown=" .. tostring(counts.UNKNOWN or 0))
+    chat("Damage anchors: root=" .. tostring(ET.DAMAGE_ANCHORS.ROOT) .. " Rising Carnage" ..
+        " general=" .. tostring(ET.DAMAGE_ANCHORS.GENERAL) .. " Prime Valor" ..
+        " physical=" .. tostring(ET.DAMAGE_ANCHORS.PHYSICAL) .. " Essence of Might" ..
+        " spell=" .. tostring(ET.DAMAGE_ANCHORS.SPELL) .. " Essence of Sorcery")
+    chat("Damage graph: signature=" .. tostring(map.signature or "?") .. " reason=" .. tostring(map.reason or "?"))
+end
+
+function ET.CartProbe()
+    local aggregates, specials = ET.AggregateCartEffects()
+    chat("Cart staged ranks=" .. tostring(#pendingSelections) ..
+        " parsed additive effects=" .. tostring(#aggregates) ..
+        " other/unparsed effects=" .. tostring(#specials))
+    for _, effect in ipairs(aggregates) do
+        local amount = tonumber(effect.amount) or 0
+        local amountText = math.floor(amount) == amount and tostring(math.floor(amount)) or tostring(amount)
+        chat(tostring(effect.key) .. " " .. (effect.unit == "%" and "percent" or "flat") .. " = " .. amountText)
+    end
+    for _, special in ipairs(specials) do
+        chat("Unparsed: [id=" .. tostring(special.id or "?") .. " rank=" .. tostring(special.rank or "?") .. "] " .. tostring(special.text or "Unknown effect"))
+    end
+    if untrackedSpend > 0 then chat("Untracked native spend=" .. formatNumber(untrackedSpend) .. " Soul Ash; benefits excluded from summary.") end
+end
+
 function ET.ShoppingProbe()
     local function frameInfo(label, frame)
         if not frame then chat(label .. " = nil"); return end
@@ -5667,6 +5707,14 @@ function ET.ShoppingProbe()
         if ok then frameInfo("MouseFocus", focus) else chat("MouseFocus probe failed: " .. tostring(focus)) end
     else
         chat("GetMouseFocus is unavailable on this client.")
+    end
+    ET.EnsureShoppingLists()
+    for name, list in pairs(EbonTreeDB.shoppingLists or {}) do
+        if type(list) == "table" and list.profile == "DAMAGE_FIRST" then
+            chat("Damage First profile=" .. tostring(name) ..
+                " context=" .. tostring(list.generatedContext or "?") ..
+                " effective entries=" .. tostring(#(list.entries or {})))
+        end
     end
 end
 
@@ -5698,6 +5746,10 @@ local function slash(msg)
             ET.GraphProbe(arg)
         elseif cmd == "apiprobe" or cmd == "api" then
             ET.APIProbe()
+        elseif cmd == "damageprobe" or cmd == "dmgprobe" then
+            ET.DamageProbe()
+        elseif cmd == "cartprobe" then
+            ET.CartProbe()
         elseif cmd == "probe" then
             if not next(liveNodes) then buildKnownNodes() end
             if not discoveryActive and not nativeReadyWait and countBoundNodes() == 0 then
@@ -5725,7 +5777,7 @@ local function slash(msg)
         elseif cmd == "apply" then
             applyChanges()
         else
-            chat("Commands: /cleantree, show, native, refresh, shopping, shoppingprobe, shopauto, shopstop, probe, apiprobe, frameprobe, orderprobe, nodeprobe <name>, graphprobe <name>, auto, apply")
+            chat("Commands: /cleantree, show, native, refresh, shopping, shoppingprobe, shopauto, shopstop, probe, apiprobe, damageprobe, cartprobe, frameprobe, orderprobe, nodeprobe <name>, graphprobe <name>, auto, apply")
         end
     end)
 
@@ -5743,6 +5795,9 @@ SlashCmdList["EBONTREE"] = slash
 
 ET:RegisterEvent("ADDON_LOADED")
 ET:RegisterEvent("PLAYER_LOGIN")
+pcall(ET.RegisterEvent, ET, "PLAYER_TALENT_UPDATE")
+pcall(ET.RegisterEvent, ET, "ACTIVE_TALENT_GROUP_CHANGED")
+pcall(ET.RegisterEvent, ET, "PLAYER_ENTERING_WORLD")
 ET:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == "CleanTree" or arg1 == "EbonTree" then
@@ -5757,6 +5812,9 @@ ET:SetScript("OnEvent", function(self, event, arg1)
         installTooltipHook()
         hookNativeTree()
         installApplyHook()
+        ET.HandleDamageContextChanged(false)
+    elseif event == "PLAYER_TALENT_UPDATE" or event == "ACTIVE_TALENT_GROUP_CHANGED" or event == "PLAYER_ENTERING_WORLD" then
+        ET.HandleDamageContextChanged(false)
     end
 end)
 
@@ -6066,7 +6124,8 @@ end)
 if _G.CleanTreeEbonAPI and CleanTreeEbonAPI.Init then
     CleanTreeEbonAPI.Init({
         onReady = function(version)
-            setStatus("EbonAPI " .. tostring(version or "1.x") .. " ready; using live Skill Tree data.", 4)
+            setStatus("EbonAPI " .. tostring(version or "2.1+") .. " ready; using live Skill Tree data.", 4)
+            ET.HandleDamageContextChanged(true)
             if mainFrame and mainFrame:IsShown() then
                 buildKnownNodes()
                 nativeReadyAttempts = 0
@@ -6075,6 +6134,7 @@ if _G.CleanTreeEbonAPI and CleanTreeEbonAPI.Init then
             end
         end,
         onFeature = function(name, available)
+            if name == "TalentDatabase" and available then ET.HandleDamageContextChanged(true) end
             if available and (name == "TalentDatabase" or name == "SkillTreeFrame" or name == "SkillTree")
                 and mainFrame and mainFrame:IsShown() and not discoveryActive and not ET._resolveActive then
                 nativeReadyAttempts = 0
