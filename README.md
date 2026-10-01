@@ -7,7 +7,7 @@ Project Ebonhold's Skill Tree is enormous. CleanTree keeps the real Ebonhold tre
 Browse what is available, find exactly what you can afford, stage purchases, review the cart, build reusable Shopping Lists, share those lists with other players, and let CleanTree stage an optimized purchase path for you — without giving up the native **Apply Changes** confirmation.
 
 <p align="center">
-  <img src="assets/screenshots/damage_recommended.jpg" alt="CleanTree class/spec-aware Damage view" width="100%">
+  <img src="assets/screenshots/damage_recommended.png" alt="CleanTree class/spec-aware Damage view" width="100%">
 </p>
 
 ---
@@ -210,7 +210,7 @@ Your current choice is preserved while moving between Progression tabs and reope
 
 **Damage → Recommended** detects the current character's class and active talent spec. It shows General Damage plus the relevant Physical or Spell leg by default, with manual **All**, **Physical**, and **Spell** views always available.
 
-![CleanTree class/spec-aware Damage view](assets/screenshots/damage_recommended.jpg)
+![CleanTree class/spec-aware Damage view](assets/screenshots/damage_recommended.png)
 
 ### 🧭 Browse unowned nodes
 
@@ -234,7 +234,7 @@ Create exact purchase priorities, start from built-in strategies, reorder indivi
 
 Purchases are staged through the native Skill Tree system and collected in **Cart** before being committed with **Apply Changes**. The Cart now summarizes additive staged benefits and keeps unusual/conditional effects visible separately.
 
-![CleanTree Cart Purchase Summary](assets/screenshots/cart_purchase_summary.jpg)
+![CleanTree Cart Purchase Summary](assets/screenshots/cart.png)
 
 ### ♾️ Endless nodes
 
