@@ -7,7 +7,7 @@ Project Ebonhold's Skill Tree is enormous. CleanTree keeps the real Ebonhold tre
 Browse what is available, find exactly what you can afford, stage purchases, review the cart, build reusable Shopping Lists, share those lists with other players, and let CleanTree stage an optimized purchase path for you — without giving up the native **Apply Changes** confirmation.
 
 <p align="center">
-  <img src="assets/screenshots/unowned.png" alt="CleanTree Unowned view" width="100%">
+  <img src="assets/screenshots/damage_recommended.jpg" alt="CleanTree class/spec-aware Damage view" width="100%">
 </p>
 
 ---
@@ -48,6 +48,7 @@ It is **not a second simulated tree**. CleanTree uses EbonAPI and the native Ebo
 | | |
 |---|---|
 | 🧭 | Browse **All**, **Unowned**, **Damage**, **Survival**, **Convenience**, **Endless**, **Cart**, and **Purchased** views |
+| ⚔️ | **Damage → Recommended** detects the current class/spec and focuses on General + Physical or General + Spell while keeping All/Physical/Spell overrides available |
 | 💸 | One-click **Buyable Now** view showing only nodes that are unlocked **and** currently affordable |
 | 🔎 | Search nodes by name and discovered effect text |
 | 🔗 | Order finite nodes by the real prerequisite graph so a node never appears before its prerequisites |
@@ -57,7 +58,7 @@ It is **not a second simulated tree**. CleanTree uses EbonAPI and the native Ebo
 | 📤 | Export a Shopping List to one compact string and import lists shared by other players |
 | 🤖 | Auto Purchase walks a Shopping List, skips temporarily blocked entries, and keeps re-checking higher priorities |
 | 🛑 | Auto Purchase **never applies changes for you** — it stops with purchases staged and waits for your review |
-| 🛒 | Review staged changes in Cart and remove staged ranks through the native right-click path |
+| 🛒 | Review staged ranks in Cart with an aggregated **Purchase Summary**, then remove individual staged ranks through the native right-click path |
 | ✅ | Apply through Project Ebonhold's native **Apply Changes** operation |
 | 🧾 | Distinguish server-committed purchases from changes staged only in the current tree |
 | ♾️ | Include all three Endless nodes as repeatable multi-rank purchases |
@@ -85,7 +86,7 @@ Availability and affordability are intentionally separate:
 |---|---|
 | **All** | Every discovered node, including purchased nodes |
 | **Unowned** | The normal working list of unfinished finite nodes |
-| **Damage** | Unfinished nodes under Rising Carnage |
+| **Damage** | Unfinished nodes under Rising Carnage. Recommended automatically shows General + the current spec's Physical or Spell leg; All/Physical/Spell remain manually selectable |
 | **Survival** | Unfinished nodes under Essence of Endurance |
 | **Convenience** | Unfinished nodes under Unshaken |
 | **Endless** | Endless Vitality, Endless Might, and Endless Growth |
@@ -113,7 +114,7 @@ Shopping Lists are exact, player-controlled purchase priorities for the finite S
 CleanTree includes several starter lists:
 
 - **Full Tree Order** — follows CleanTree's prerequisite-safe tree order.
-- **Damage First** — prioritizes Damage before the other finite branches.
+- **Damage First** — adapts to the current class/spec, prioritizing General + the relevant Physical or Spell leg while preserving prerequisites and moving the off-spec Damage leg later rather than deleting it.
 - **Survival First** — prioritizes Survival first.
 - **Convenience First** — prioritizes Convenience first.
 - **Balanced** — spreads priority across the three finite branches.
@@ -178,6 +179,8 @@ CleanTree is a replacement presentation layer, not a separate Skill Tree simulat
 
 A manual `+` click or Shopping List Auto Purchase stages the corresponding **live native node**. Cart removal uses the native tree's staged-removal behavior when available. **Apply Changes** invokes Project Ebonhold's native apply path, so the server remains authoritative for the final committed result.
 
+While **Cart** is selected, the right panel becomes **PURCHASE SUMMARY**. Compatible staged stat gains are normalized and summed, while flat values, percentages, and ratings remain separate. Conditional, proc, immunity, and other non-additive effects remain visible under **Other Effects** instead of being mathematically misrepresented. If native changes exist that CleanTree did not stage and cannot identify precisely, they are explicitly excluded from the benefit totals.
+
 `Discard (/reload)` remains available as a safe fallback for abandoning staged changes when a reliable native full-reset path is not available.
 
 ## ♾️ Endless nodes
@@ -203,6 +206,12 @@ Your current choice is preserved while moving between Progression tabs and reope
 
 ## 📸 Screenshots
 
+### ⚔️ Class/spec-aware Damage browsing
+
+**Damage → Recommended** detects the current character's class and active talent spec. It shows General Damage plus the relevant Physical or Spell leg by default, with manual **All**, **Physical**, and **Spell** views always available.
+
+![CleanTree class/spec-aware Damage view](assets/screenshots/damage_recommended.jpg)
+
 ### 🧭 Browse unowned nodes
 
 CleanTree turns the native visual graph into a stable, searchable list while preserving the real Ebonhold prerequisite and purchase state underneath.
@@ -223,9 +232,9 @@ Create exact purchase priorities, start from built-in strategies, reorder indivi
 
 ### 🛒 Stage and review purchases
 
-Purchases are staged through the native Skill Tree system and collected in **Cart** before being committed with **Apply Changes**.
+Purchases are staged through the native Skill Tree system and collected in **Cart** before being committed with **Apply Changes**. The Cart now summarizes additive staged benefits and keeps unusual/conditional effects visible separately.
 
-![CleanTree Cart view](assets/screenshots/cart.png)
+![CleanTree Cart Purchase Summary](assets/screenshots/cart_purchase_summary.jpg)
 
 ### ♾️ Endless nodes
 
@@ -245,7 +254,7 @@ The **Purchased** view shows server-committed ranks reported through EbonAPI.
 |---|---|
 | Game | World of Warcraft 3.3.5a on Project Ebonhold |
 | Integration | ProjectEbonhold, included with the Ebonhold client |
-| Required addon | [EbonAPI](https://github.com/Siphelis/EbonAPI) 1.0+ — installed separately; CleanTree does not bundle it |
+| Required addon | [EbonAPI](https://github.com/Siphelis/EbonAPI) 2.1.0+ — installed separately; CleanTree does not bundle it |
 
 `SkillTreeAutoLoad` is **not** required. CleanTree and SkillTreeAutoLoad can coexist because both consume the shared EbonAPI integration layer independently.
 
@@ -273,6 +282,8 @@ Useful commands include:
 /cleantree orderprobe
 /cleantree graphprobe <node name>
 /cleantree apiprobe
+/cleantree damageprobe
+/cleantree cartprobe
 /cleantree shoppingprobe
 /cleantree auto
 /cleantree apply
