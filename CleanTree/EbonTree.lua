@@ -3833,7 +3833,7 @@ function ET.RenameShoppingList(oldName, newName)
     newName = ET.UniqueShoppingName(newName)
     EbonTreeDB.shoppingLists[oldName] = nil
     list.name = newName
-    list.seeded = nil
+    ET.MarkShoppingListModified(list)
     EbonTreeDB.shoppingLists[newName] = list
     if EbonTreeDB.activeShoppingList == oldName then EbonTreeDB.activeShoppingList = newName end
     if ET.shoppingRun and ET.shoppingRun.listName == oldName then ET.shoppingRun.listName = newName end
@@ -3961,6 +3961,7 @@ end
 function ET.AppendMissingShoppingNodes()
     local list = ET.SelectedShoppingList()
     if not list then return end
+    ET.MarkShoppingListModified(list)
     local seen = {}
     for _, id in ipairs(list.entries or {}) do seen[tonumber(id)] = true end
     local added = 0
@@ -3983,6 +3984,7 @@ function ET.AddShoppingNode(id)
             return
         end
     end
+    ET.MarkShoppingListModified(list)
     list.entries[#list.entries + 1] = id
     setStatus("Added " .. tostring(DATA.nodes[id].name or id) .. " to " .. tostring(list.name) .. ".", 3)
     ET.RefreshShoppingUI()
@@ -3990,7 +3992,11 @@ end
 
 function ET.RemoveShoppingEntry(index)
     local list = ET.SelectedShoppingList()
-    if list and list.entries and list.entries[index] then table.remove(list.entries, index); ET.RefreshShoppingUI() end
+    if list and list.entries and list.entries[index] then
+        ET.MarkShoppingListModified(list)
+        table.remove(list.entries, index)
+        ET.RefreshShoppingUI()
+    end
 end
 
 function ET.MoveShoppingEntry(index, destination)
@@ -4000,6 +4006,7 @@ function ET.MoveShoppingEntry(index, destination)
     local dest = tonumber(destination) or index
     if dest < 1 then dest = 1 elseif dest > count then dest = count end
     if dest == index then return end
+    ET.MarkShoppingListModified(list)
     local id = table.remove(list.entries, index)
     table.insert(list.entries, dest, id)
     ET.RefreshShoppingUI()
@@ -4745,6 +4752,41 @@ local function dockToNativeTree()
     return true
 end
 
+function ET.UpdateDamageSelector()
+    local show = selectedCategory == "DAMAGE" and ET.damageModeButtons ~= nil
+    if ET.listTitle then
+        if show then ET.listTitle:Hide() else ET.listTitle:Show() end
+    end
+    for mode, button in pairs(ET.damageModeButtons or {}) do
+        if show then button:Show() else button:Hide() end
+        if mode == (ET.damageViewMode or "RECOMMENDED") then button:LockHighlight() else button:UnlockHighlight() end
+    end
+    if show and ET.damageModeButtons.RECOMMENDED then
+        local preference = ET.GetPlayerDamagePreference()
+        if not ET.damageBranchMap or not ET.damageBranchMap.valid then preference = "ALL" end
+        local label = preference == "SPELL" and "Spell" or (preference == "PHYSICAL" and "Physical" or "All")
+        ET.damageModeButtons.RECOMMENDED:SetText("Recommended (" .. label .. ")")
+    end
+end
+
+function ET.UpdateRightPanelMode()
+    local detail, pending, right = ET.detailFrame, ET.pendingFrame, ET.rightFrame
+    if not detail or not pending or not right then return end
+    pending:ClearAllPoints()
+    if selectedCategory == "CART" then
+        detail:Hide()
+        pending:SetPoint("TOPLEFT", right, "TOPLEFT", 10, -10)
+        pending:SetPoint("BOTTOMRIGHT", right, "BOTTOMRIGHT", -10, 80)
+        if ET.pendingTitle then ET.pendingTitle:SetText("PURCHASE SUMMARY") end
+    else
+        detail:Show()
+        pending:SetPoint("TOPLEFT", detail, "BOTTOMLEFT", 0, -8)
+        pending:SetPoint("BOTTOMRIGHT", right, "BOTTOMRIGHT", -10, 80)
+        if ET.pendingTitle then ET.pendingTitle:SetText("Pending Changes") end
+    end
+    refreshPendingPanel()
+end
+
 local function createUI()
     if mainFrame then return end
 
@@ -4832,6 +4874,8 @@ local function createUI()
         selectedCategory = "BUYABLE"
         for _, tb in pairs(tabButtons) do tb:UnlockHighlight() end
         ET.buyableButton:LockHighlight()
+        ET.UpdateDamageSelector()
+        ET.UpdateRightPanelMode()
         rebuildFiltered()
         resetScrollTop()
         refreshRows()
@@ -4863,6 +4907,8 @@ local function createUI()
             for k, tb in pairs(tabButtons) do
                 if k == key then tb:LockHighlight() else tb:UnlockHighlight() end
             end
+            ET.UpdateDamageSelector()
+            ET.UpdateRightPanelMode()
             rebuildFiltered()
             resetScrollTop()
             refreshRows()
@@ -4904,6 +4950,32 @@ local function createUI()
     local listTitle = left:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     listTitle:SetPoint("TOPLEFT", 14, -12)
     listTitle:SetText("Nodes")
+    ET.listTitle = listTitle
+
+    ET.damageModeButtons = {}
+    local damageRecommended = makeButton(left, "Recommended", 148, 22)
+    damageRecommended:SetPoint("TOPLEFT", 10, -6)
+    local damageAll = makeButton(left, "All", 48, 22)
+    damageAll:SetPoint("LEFT", damageRecommended, "RIGHT", 4, 0)
+    local damagePhysical = makeButton(left, "Physical", 78, 22)
+    damagePhysical:SetPoint("LEFT", damageAll, "RIGHT", 4, 0)
+    local damageSpell = makeButton(left, "Spell", 62, 22)
+    damageSpell:SetPoint("LEFT", damagePhysical, "RIGHT", 4, 0)
+    ET.damageModeButtons.RECOMMENDED = damageRecommended
+    ET.damageModeButtons.ALL = damageAll
+    ET.damageModeButtons.PHYSICAL = damagePhysical
+    ET.damageModeButtons.SPELL = damageSpell
+    for mode, button in pairs(ET.damageModeButtons) do
+        button.damageMode = mode
+        button:SetScript("OnClick", function(self)
+            ET.damageViewMode = self.damageMode or "RECOMMENDED"
+            ET.UpdateDamageSelector()
+            rebuildFiltered()
+            resetScrollTop()
+            refreshRows()
+        end)
+        button:Hide()
+    end
 
     listScroll = CreateFrame("ScrollFrame", "EbonTreeNodeScroll", left, "FauxScrollFrameTemplate")
     listScroll:SetPoint("TOPLEFT", 4, -34)
@@ -4932,7 +5004,9 @@ local function createUI()
     right:SetPoint("BOTTOMRIGHT", -12, 12)
     setBackdrop(right, C.panel)
 
+    ET.rightFrame = right
     local detail = CreateFrame("Frame", nil, right)
+    ET.detailFrame = detail
     detail:SetPoint("TOPLEFT", 10, -10)
     detail:SetPoint("TOPRIGHT", -10, -10)
     detail:SetHeight(190)
@@ -4952,6 +5026,7 @@ local function createUI()
     detailBody:SetText("Choose a node on the left to inspect its live Ebonhold effect, rank, cost, and availability.")
 
     local pending = CreateFrame("Frame", nil, right)
+    ET.pendingFrame = pending
     pending:SetPoint("TOPLEFT", detail, "BOTTOMLEFT", 0, -8)
     pending:SetPoint("BOTTOMRIGHT", -10, 80)
     setBackdrop(pending, C.panel2)
@@ -4959,6 +5034,7 @@ local function createUI()
     local pendingTitle = pending:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     pendingTitle:SetPoint("TOPLEFT", 14, -12)
     pendingTitle:SetText("Pending Changes")
+    ET.pendingTitle = pendingTitle
 
     pendingText = pending:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     pendingText:SetPoint("TOPLEFT", pendingTitle, "BOTTOMLEFT", 0, -8)
@@ -4984,6 +5060,9 @@ local function createUI()
     applyButton = makeButton(right, "APPLY CHANGES", 150, 32)
     applyButton:SetPoint("BOTTOMRIGHT", -12, 16)
     applyButton:SetScript("OnClick", applyChanges)
+
+    ET.UpdateDamageSelector()
+    ET.UpdateRightPanelMode()
 
     ET.loadingOverlay = CreateFrame("Frame", nil, mainFrame)
     ET.loadingOverlay:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, -8)
@@ -5543,6 +5622,10 @@ function ET.APIProbe()
         return
     end
     local status = bridge.GetStatus and bridge.GetStatus() or {}
+    chat("EbonAPI version=" .. tostring(status.apiVersion or "unknown") ..
+        " required=" .. tostring(status.requiredVersion or "2.1.0+") ..
+        " compatible=" .. tostring(status.compatible) ..
+        " handle=" .. tostring(status.apiHandle))
     chat("EbonAPI ready=" .. tostring(status.ready) ..
         " TalentDatabase=" .. tostring(status.talentDatabase) ..
         " nodes=" .. tostring(status.nodes or 0) ..
