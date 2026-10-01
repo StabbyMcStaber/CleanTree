@@ -4,7 +4,11 @@
 CleanTreeEbonAPI = CleanTreeEbonAPI or {}
 local A = CleanTreeEbonAPI
 
-A.api = EbonAPI and EbonAPI:NewAddon("CleanTree", 1, 0) or nil
+A.requiredMajor = 2
+A.requiredMinor = 1
+A.requiredVersion = "2.1.0+"
+A.apiVersion = EbonAPI and EbonAPI.version or nil
+A.api = EbonAPI and EbonAPI:NewAddon("CleanTree", A.requiredMajor, A.requiredMinor) or nil
 A.ready = false
 A.tree = nil
 A.defsById = {}
@@ -23,12 +27,10 @@ end
 
 local function parseNumberText(text)
     if type(text) ~= "string" then return nil end
-    if EbonAPI and EbonAPI.Lib and EbonAPI.Lib.stripColor then
-        text = EbonAPI.Lib.stripColor(text)
-    else
-        text = string.gsub(text, "|c%x%x%x%x%x%x%x%x", "")
-        text = string.gsub(text, "|r", "")
-    end
+    -- Keep CleanTree on EbonAPI's public contract. Color stripping is trivial here,
+    -- so do not depend on EbonAPI.Lib internals that may change between releases.
+    text = string.gsub(text, "|c%x%x%x%x%x%x%x%x", "")
+    text = string.gsub(text, "|r", "")
     local sign, numberPart = string.match(text, "(%-?)([%d][%d%s,%.]*)%s*$")
     if not numberPart then
         numberPart = string.match(text, "([%d][%d%s,%.]*)")
@@ -241,10 +243,32 @@ function A.RequestLoadout(force)
     return ok and value ~= false
 end
 
+function A.IsReady()
+    if A.api and A.api.IsReady then
+        local ok, value = pcall(A.api.IsReady, A.api)
+        if ok then return value == true end
+    end
+    return A.ready == true
+end
+
 function A.GetStatus()
     local ash, source = A.GetAvailableAsh()
+    local version, major, minor, patch = nil, nil, nil, nil
+    if EbonAPI and EbonAPI.GetVersion then
+        local ok, v, maj, min, pat = pcall(EbonAPI.GetVersion, EbonAPI)
+        if ok then version, major, minor, patch = v, maj, min, pat end
+    end
+    version = version or A.apiVersion
     return {
-        ready = A.ready,
+        ready = A.IsReady(),
+        apiPresent = EbonAPI ~= nil,
+        apiHandle = A.api ~= nil,
+        apiVersion = version,
+        apiMajor = major,
+        apiMinor = minor,
+        apiPatch = patch,
+        requiredVersion = A.requiredVersion,
+        compatible = A.api ~= nil,
         nodes = A.NodeCount(),
         talentDatabase = A.tree ~= nil,
         skillTreeFrame = A.GetFeature("SkillTreeFrame"),
@@ -287,6 +311,19 @@ function A.Init(callbacks)
         A.serverLoadout = loadout
         if A.callbacks and A.callbacks.onLoadout then A.callbacks.onLoadout(loadout) end
     end)
+
+    -- EbonAPI 2.1 exposes authoritative readiness on the addon handle. Sticky READY
+    -- should normally populate A.ready, but seed from the handle as a defensive fallback
+    -- when CleanTree attaches after PLAYER_LOGIN or another addon changes event timing.
+    if not A.ready and A.IsReady() then
+        A.ready = true
+        A.RefreshTalentDatabase()
+        A.RefreshState()
+        A.RequestLoadout(true)
+        if A.callbacks and A.callbacks.onReady then
+            A.callbacks.onReady((EbonAPI and EbonAPI.version) or A.apiVersion)
+        end
+    end
 
     return true
 end
