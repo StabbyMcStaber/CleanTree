@@ -1,4 +1,5 @@
 -- CleanTree v1.1.1
+-- CleanTree v1.2.0
 -- Project Ebonhold / WoW 3.3.5a
 --
 -- Functional replacement UI for the Soul Ash Skill Tree.
@@ -12,7 +13,7 @@
 
 EbonTreeDB = EbonTreeDB or {}
 
-local VERSION = "1.1.1"
+local VERSION = "1.2.0"
 local DATA = _G.EbonTreeData or { nodes = {} }
 local ET = CreateFrame("Frame")
 _G.EbonTree = ET
@@ -948,7 +949,7 @@ end
 local function isConditionalDescription(desc)
     local s = lower(desc)
     local needles = {
-        "whenever ", "when ", "while ", "chance", " for ", "stacks", "after ",
+        "whenever ", "when ", "while ", "chance to ", "chance of ", " proc", "trigger", " for ", "stacks", "after ",
         "upon ", "each time", "every time", "if ", "below ", "above "
     }
     for _, n in ipairs(needles) do
@@ -963,6 +964,64 @@ local function titleCaseSimple(s)
     return string.upper(string.sub(s, 1, 1)) .. string.sub(s, 2)
 end
 
+ET.CART_EFFECT_ORDER = {
+    SPELL_POWER = 10,
+    ATTACK_POWER = 20,
+    STRENGTH = 30,
+    AGILITY = 40,
+    STAMINA = 50,
+    INTELLECT = 60,
+    SPIRIT = 70,
+    HIT_PERCENT = 80,
+    HIT_RATING = 81,
+    CRIT_PERCENT = 90,
+    CRIT_RATING = 91,
+    HASTE_PERCENT = 100,
+    HASTE_RATING = 101,
+    ARMOR = 110,
+    HEALTH = 120,
+    MANA = 130,
+}
+
+function ET.NormalizeEffectKey(rawKey, unit)
+    local raw = compactSpace(rawKey or "")
+    local low = lower(raw)
+    low = string.gsub(low, "^your%s+", "")
+    unit = unit or ""
+
+    local key, label
+    local recognized = true
+    if low == "spell power" then key, label = "SPELL_POWER", "Spell Power"
+    elseif low == "attack power" then key, label = "ATTACK_POWER", "Attack Power"
+    elseif low == "strength" then key, label = "STRENGTH", "Strength"
+    elseif low == "agility" then key, label = "AGILITY", "Agility"
+    elseif low == "stamina" then key, label = "STAMINA", "Stamina"
+    elseif low == "intellect" then key, label = "INTELLECT", "Intellect"
+    elseif low == "spirit" then key, label = "SPIRIT", "Spirit"
+    elseif low == "hit chance" then key, label = "HIT_PERCENT", "Hit Chance"
+    elseif low == "hit rating" then key, label = "HIT_RATING", "Hit Rating"
+    elseif low == "critical strike chance" or low == "crit chance" then key, label = "CRIT_PERCENT", "Critical Strike Chance"
+    elseif low == "critical strike rating" or low == "crit rating" then key, label = "CRIT_RATING", "Critical Strike Rating"
+    elseif low == "haste" or low == "haste rating" then
+        if unit == "%" then key, label = "HASTE_PERCENT", "Haste"
+        else key, label = "HASTE_RATING", "Haste Rating" end
+    elseif low == "armor" then key, label = "ARMOR", "Armor"
+    elseif low == "health" then key, label = "HEALTH", "Health"
+    elseif low == "mana" then key, label = "MANA", "Mana"
+    elseif string.sub(low, 1, 16) == "experience from " then
+        local source = compactSpace(string.sub(raw, 17))
+        key = "EXPERIENCE_FROM:" .. lower(source)
+        label = "Experience from " .. source
+    else
+        key = "RAW:" .. low
+        label = titleCaseSimple(raw)
+        recognized = false
+    end
+
+    local order = ET.CART_EFFECT_ORDER[key] or 900
+    return key, label, order, recognized
+end
+
 local function summarizeEffect(desc)
     desc = compactSpace(desc)
     if desc == "" then
@@ -973,7 +1032,9 @@ local function summarizeEffect(desc)
     if source and amount then
         return {
             text = "+" .. amount .. "% experience from " .. source,
-            key = "Experience from " .. source,
+            key = "EXPERIENCE_FROM:" .. lower(compactSpace(source)),
+            display = "Experience from " .. compactSpace(source),
+            order = 900,
             amount = tonumber(amount), unit = "%", aggregate = true,
         }
     end
@@ -991,15 +1052,22 @@ local function summarizeEffect(desc)
         if stat and amount2 then
             stat = titleCaseSimple(stat)
             local unit = (pct == "%") and "%" or ""
-            return {
-                text = "+" .. amount2 .. unit .. " " .. stat,
-                key = stat,
-                amount = tonumber(amount2), unit = unit, aggregate = true,
-            }
+            local key, display, order, recognized = ET.NormalizeEffectKey(stat, unit)
+            if recognized then
+                return {
+                    text = "+" .. amount2 .. unit .. " " .. display,
+                    key = key, display = display, order = order, sourceKey = stat,
+                    amount = tonumber(amount2), unit = unit, aggregate = true,
+                }
+            end
         end
     end
 
     return {text = desc, aggregate = false}
+end
+
+function ET.ParseNodeEffect(desc)
+    return summarizeEffect(desc)
 end
 
 local function descriptionFromSpellTooltip(lines)
