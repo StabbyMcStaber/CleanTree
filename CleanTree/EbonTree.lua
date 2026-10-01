@@ -2606,8 +2606,12 @@ rebuildFiltered = function()
             -- All really means all: purchased, unowned, and Endless.
             include = true
         else
-            -- Branch tabs stay focused on unfinished/actionable nodes.
+            -- Branch tabs stay focused on unfinished/actionable nodes. Damage
+            -- additionally applies the session-scoped class/spec relevance view.
             include = (node.category == selectedCategory) and (node.isEndless or node.fullyOwned ~= true)
+            if include and selectedCategory == "DAMAGE" then
+                include = ET.IsDamageNodeRelevant(node, ET.damageViewMode or "RECOMMENDED")
+            end
         end
         if include and textMatchesSearch(node) then
             filteredNodes[#filteredNodes + 1] = node
@@ -2637,38 +2641,77 @@ rebuildFiltered = function()
     end)
 end
 
-local function pendingSummaryLines()
-    local aggregates = {}
-    local specials = {}
-    for _, p in ipairs(pendingSelections) do
+function ET.AggregateCartEffects(selections)
+    local aggregates, specials = {}, {}
+    for _, p in ipairs(selections or pendingSelections) do
         local effect = p.effect
         if effect and effect.aggregate and effect.key and effect.amount then
-            local k = effect.key .. "|" .. tostring(effect.unit or "")
-            local a = aggregates[k]
-            if not a then
-                a = {key = effect.key, unit = effect.unit or "", amount = 0, count = 0}
-                aggregates[k] = a
+            local numericAmount = tonumber(effect.amount)
+            if numericAmount and numericAmount ~= 0 then
+                local k = tostring(effect.key) .. "|" .. tostring(effect.unit or "")
+                local a = aggregates[k]
+                if not a then
+                    a = {
+                        key = effect.key,
+                        display = effect.display or effect.sourceKey or effect.key,
+                        unit = effect.unit or "",
+                        amount = 0,
+                        count = 0,
+                        order = tonumber(effect.order) or 900,
+                    }
+                    aggregates[k] = a
+                end
+                a.amount = a.amount + numericAmount
+                a.count = a.count + 1
+            elseif not numericAmount then
+                specials[#specials + 1] = {
+                    id = p.nodeID,
+                    rank = p.rank,
+                    text = effect.text or (p.description or "Unknown effect"),
+                }
             end
-            a.amount = a.amount + effect.amount
-            a.count = a.count + 1
         else
-            specials[#specials + 1] = effect and effect.text or (p.description or "Unknown effect")
+            specials[#specials + 1] = {
+                id = p.nodeID,
+                rank = p.rank,
+                text = effect and effect.text or (p.description or "Unknown effect"),
+            }
         end
     end
 
-    local lines = {}
     local aggList = {}
     for _, a in pairs(aggregates) do aggList[#aggList + 1] = a end
-    table.sort(aggList, function(a, b) return a.key < b.key end)
-    for _, a in ipairs(aggList) do
-        local amt = a.amount
-        local amtText
-        if math.floor(amt) == amt then amtText = tostring(math.floor(amt)) else amtText = tostring(amt) end
-        lines[#lines + 1] = "|cff33ff33+" .. amtText .. a.unit .. "|r " .. a.key
-    end
+    table.sort(aggList, function(a, b)
+        if a.order ~= b.order then return a.order < b.order end
+        if a.display ~= b.display then return tostring(a.display) < tostring(b.display) end
+        return tostring(a.unit) < tostring(b.unit)
+    end)
+    return aggList, specials
+end
 
-    for _, s in ipairs(specials) do
-        lines[#lines + 1] = "|cffffd200•|r " .. s
+function ET.FormatAggregatedEffect(effect)
+    local amount = tonumber(effect and effect.amount) or 0
+    local amountText
+    if math.floor(amount) == amount then amountText = formatNumber(amount) else amountText = tostring(amount) end
+    local display = tostring(effect and effect.display or effect and effect.key or "Effect")
+    return display .. "  |cff33ff33+" .. amountText .. tostring(effect and effect.unit or "") .. "|r"
+end
+
+local function pendingSummaryLines()
+    local aggregates, specials = ET.AggregateCartEffects()
+    local lines = {}
+    for _, effect in ipairs(aggregates) do lines[#lines + 1] = ET.FormatAggregatedEffect(effect) end
+
+    local showOtherHeading = selectedCategory == "CART" and (#specials > 0 or untrackedSpend > 0)
+    if showOtherHeading then
+        if #lines > 0 then lines[#lines + 1] = "" end
+        lines[#lines + 1] = "|cffffd200Other Effects|r"
+    end
+    for _, special in ipairs(specials) do
+        lines[#lines + 1] = "|cffffd200•|r " .. tostring(special.text or "Unknown effect")
+    end
+    if selectedCategory == "CART" and untrackedSpend > 0 then
+        lines[#lines + 1] = "|cffff9933• Untracked native staged changes are excluded from benefit totals.|r"
     end
     return lines
 end
@@ -3381,7 +3424,7 @@ end
 -- while keeping the player in control of the exact node order.
 
 ET.SHOPPING_EXPORT_VERSION = "CTSL1"
-ET.SHOPPING_SEED_VERSION = 1
+ET.SHOPPING_SEED_VERSION = 2
 ET.shoppingFrame = nil
 ET.shoppingImportFrame = nil
 ET.shoppingExportFrame = nil
