@@ -1,4 +1,3 @@
--- CleanTree v1.1.1
 -- CleanTree v1.2.0
 -- Project Ebonhold / WoW 3.3.5a
 --
