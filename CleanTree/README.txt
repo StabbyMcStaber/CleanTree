@@ -1,3 +1,23 @@
+CleanTree v1.2.0
+
+Class/spec-aware Damage browsing, adaptive Damage First, Cart Purchase Summary, and EbonAPI 2.1 support
+
+- Requires EbonAPI 2.1.0 or newer.
+- Damage Recommended now resolves Physical / Spell / All from the current class and active WoW 3.3.5 talent spec.
+- The live Rising Carnage prerequisite graph is validated and divided into General, Physical, and Spell legs.
+- Damage adds Recommended, All, Physical, and Spell browsing modes without changing the main CleanTree tab layout.
+- Damage First now adapts to the current class/spec while remaining prerequisite-safe; off-spec Damage is deprioritized rather than removed.
+- Existing user-modified, custom, and imported Shopping Lists are preserved and CTSL1 export/import remains static and deterministic.
+- Cart now expands into PURCHASE SUMMARY and aggregates compatible staged stat gains while preserving flat, percentage, and rating distinctions.
+- Conditional, proc, immunity, and unrecognized staged effects remain visible under Other Effects instead of being falsely summed.
+- Adds /cleantree damageprobe and /cleantree cartprobe diagnostics and expands shopping diagnostics.
+- EbonAPI integration now targets the public 2.1 API contract and reports authoritative readiness/version state.
+- Purchasing, native Apply Changes, cart removal, Endless staging, native restoration, Buyable Now, and the established layout remain on the known-good paths.
+
+Validated in-game on Project Ebonhold before release.
+
+------------------------------------------------------------------------
+
 CleanTree v1.1.1
 
 Native footer / Apply hotfix:
