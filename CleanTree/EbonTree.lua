@@ -2299,6 +2299,251 @@ function ET.BuildTreeOrderCache()
     end
 
     ET.treeOrderReady = true
+    if ET.BuildDamageBranchMap then ET.BuildDamageBranchMap() end
+    if ET.RefreshGeneratedShoppingProfiles then ET.RefreshGeneratedShoppingProfiles(true) end
+end
+
+ET.damageViewMode = ET.damageViewMode or "RECOMMENDED"
+ET.DAMAGE_ANCHORS = { ROOT = 90, PHYSICAL = 1, GENERAL = 2, SPELL = 5 }
+
+function ET.RefreshPlayerDamagePreference()
+    local className, classToken = nil, nil
+    if type(UnitClass) == "function" then
+        local ok, a, b = pcall(UnitClass, "player")
+        if ok then className, classToken = a, b end
+    end
+    classToken = classToken or "UNKNOWN"
+
+    local activeGroup = 1
+    if type(GetActiveTalentGroup) == "function" then
+        local ok, value = pcall(GetActiveTalentGroup, false)
+        if ok and tonumber(value) then activeGroup = tonumber(value) end
+    end
+
+    local bestIndex, bestName, bestPoints, tied = nil, nil, -1, false
+    if type(GetTalentTabInfo) == "function" then
+        for tabIndex = 1, 3 do
+            local ok, name, icon, points = pcall(GetTalentTabInfo, tabIndex, false, false, activeGroup)
+            if not ok then ok, name, icon, points = pcall(GetTalentTabInfo, tabIndex) end
+            points = ok and tonumber(points) or nil
+            if points then
+                if points > bestPoints then
+                    bestIndex, bestName, bestPoints, tied = tabIndex, name, points, false
+                elseif points == bestPoints then
+                    tied = true
+                end
+            end
+        end
+    end
+
+    local preference = "ALL"
+    if classToken == "MAGE" or classToken == "PRIEST" or classToken == "WARLOCK" then
+        preference = "SPELL"
+    elseif classToken == "WARRIOR" or classToken == "ROGUE" or classToken == "HUNTER" or classToken == "DEATHKNIGHT" then
+        preference = "PHYSICAL"
+    elseif (classToken == "DRUID" or classToken == "SHAMAN" or classToken == "PALADIN") and bestIndex and bestPoints > 0 and not tied then
+        if classToken == "DRUID" then
+            preference = (bestIndex == 2) and "PHYSICAL" or "SPELL"
+        elseif classToken == "SHAMAN" then
+            preference = (bestIndex == 2) and "PHYSICAL" or "SPELL"
+        elseif classToken == "PALADIN" then
+            preference = (bestIndex == 1) and "SPELL" or "PHYSICAL"
+        end
+    end
+
+    ET.damageClassName = className or classToken
+    ET.damageClassToken = classToken
+    ET.damageTalentGroup = activeGroup
+    ET.damageSpecIndex = (not tied) and bestIndex or nil
+    ET.damageSpecName = tied and "Ambiguous" or (bestName or "Unknown")
+    ET.damageSpecPoints = bestPoints >= 0 and bestPoints or nil
+    ET.damagePreference = preference
+    return preference
+end
+
+function ET.GetPlayerDamagePreference()
+    if not ET.damagePreference then ET.RefreshPlayerDamagePreference() end
+    return ET.damagePreference or "ALL"
+end
+
+function ET.BuildDamageBranchMap()
+    local bridge = _G.CleanTreeEbonAPI
+    local tree = bridge and bridge.tree or nil
+    local map = {
+        valid = false,
+        reason = "Talent Database unavailable",
+        branchById = {},
+        counts = { ROOT = 0, GENERAL = 0, PHYSICAL = 0, SPELL = 0, MIXED = 0, UNKNOWN = 0 },
+        requiredByMode = {},
+        parentsById = {},
+        signature = "unavailable",
+    }
+    ET.damageBranchMap = map
+
+    if type(tree) ~= "table" or type(tree.nodes) ~= "table" or type(tree.links) ~= "table" then return false end
+
+    local root = tonumber((_G.EbonTreeOrderData and EbonTreeOrderData.roots and EbonTreeOrderData.roots.DAMAGE) or ET.DAMAGE_ANCHORS.ROOT)
+    local anchors = ET.DAMAGE_ANCHORS
+    local children, defs = {}, {}
+    for _, def in ipairs(tree.nodes) do
+        local id = tonumber(def and def.id)
+        if id then defs[id] = true end
+    end
+    for _, link in ipairs(tree.links) do
+        local parentId = tonumber(link and link[1])
+        local childId = tonumber(link and link[2])
+        if parentId and childId then
+            children[parentId] = children[parentId] or {}
+            children[parentId][#children[parentId] + 1] = childId
+            map.parentsById[childId] = map.parentsById[childId] or {}
+            map.parentsById[childId][#map.parentsById[childId] + 1] = parentId
+        end
+    end
+
+    if not defs[root] or not defs[anchors.PHYSICAL] or not defs[anchors.GENERAL] or not defs[anchors.SPELL] then
+        map.reason = "Current Damage root/anchors are missing from the live Talent Database"
+        return false
+    end
+
+    local direct = {}
+    for _, childId in ipairs(children[root] or {}) do direct[childId] = true end
+    if not direct[anchors.PHYSICAL] or not direct[anchors.GENERAL] or not direct[anchors.SPELL] then
+        map.reason = "Current Damage anchors are no longer direct children of Rising Carnage"
+        return false
+    end
+
+    local membership = {}
+    local function walk(anchorId, label)
+        local queue, seen, index = {anchorId}, {}, 1
+        while queue[index] do
+            local id = queue[index]
+            index = index + 1
+            if not seen[id] then
+                seen[id] = true
+                membership[id] = membership[id] or {}
+                membership[id][label] = true
+                for _, childId in ipairs(children[id] or {}) do queue[#queue + 1] = childId end
+            end
+        end
+    end
+    walk(anchors.PHYSICAL, "PHYSICAL")
+    walk(anchors.GENERAL, "GENERAL")
+    walk(anchors.SPELL, "SPELL")
+
+    for id, static in pairs(DATA.nodes or {}) do
+        id = tonumber(id)
+        if static and static.category == "DAMAGE" then
+            local branch
+            if id == root then
+                branch = "ROOT"
+            else
+                local m = membership[id] or {}
+                local count, only = 0, nil
+                for _, label in ipairs({"GENERAL", "PHYSICAL", "SPELL"}) do
+                    if m[label] then count, only = count + 1, label end
+                end
+                if count == 1 then branch = only
+                elseif count > 1 then branch = "MIXED"
+                else branch = "UNKNOWN" end
+            end
+            map.branchById[id] = branch
+            map.counts[branch] = (map.counts[branch] or 0) + 1
+        end
+    end
+
+    local function buildRequired(targetBranch, includeGeneral)
+        local needed, queue, index = {}, {}, 1
+        for id, branch in pairs(map.branchById) do
+            if branch == targetBranch or branch == "MIXED" or branch == "ROOT" or (includeGeneral and branch == "GENERAL") then
+                needed[id] = true
+                queue[#queue + 1] = id
+            end
+        end
+        while queue[index] do
+            local id = queue[index]
+            index = index + 1
+            for _, parentId in ipairs(map.parentsById[id] or {}) do
+                if map.branchById[parentId] and not needed[parentId] then
+                    needed[parentId] = true
+                    queue[#queue + 1] = parentId
+                end
+            end
+        end
+        return needed
+    end
+
+    map.requiredByMode.PHYSICAL = buildRequired("PHYSICAL", false)
+    map.requiredByMode.SPELL = buildRequired("SPELL", false)
+    map.requiredByMode.RECOMMENDED_PHYSICAL = buildRequired("PHYSICAL", true)
+    map.requiredByMode.RECOMMENDED_SPELL = buildRequired("SPELL", true)
+    map.signature = tostring(root) .. ":" .. tostring(bridge and bridge.NodeCount and bridge.NodeCount() or #tree.nodes) .. ":" .. tostring(bridge and bridge.linkCount or #tree.links)
+
+    if (map.counts.UNKNOWN or 0) > 0 then
+        map.reason = tostring(map.counts.UNKNOWN) .. " Damage node(s) were not reachable from the validated anchors"
+        return false
+    end
+
+    map.valid = true
+    map.reason = "ok"
+    return true
+end
+
+function ET.GetDamageBranch(nodeOrId)
+    local id = type(nodeOrId) == "table" and tonumber(nodeOrId.id) or tonumber(nodeOrId)
+    if not ET.damageBranchMap then ET.BuildDamageBranchMap() end
+    return id and ET.damageBranchMap and ET.damageBranchMap.branchById[id] or nil
+end
+
+function ET.IsDamageNodeRelevant(nodeOrId, mode)
+    local id = type(nodeOrId) == "table" and tonumber(nodeOrId.id) or tonumber(nodeOrId)
+    if not id then return false end
+    if not ET.damageBranchMap then ET.BuildDamageBranchMap() end
+    local map = ET.damageBranchMap
+    if not map or not map.valid then return true end
+
+    mode = mode or ET.damageViewMode or "RECOMMENDED"
+    if mode == "ALL" then return true end
+    if mode == "RECOMMENDED" then
+        local preference = ET.GetPlayerDamagePreference()
+        if preference == "ALL" then return true end
+        mode = "RECOMMENDED_" .. preference
+    end
+    local required = map.requiredByMode and map.requiredByMode[mode]
+    return required and required[id] == true or false
+end
+
+function ET.GetDamageContextKey()
+    if not ET.damagePreference then ET.RefreshPlayerDamagePreference() end
+    if not ET.damageBranchMap then ET.BuildDamageBranchMap() end
+    local map = ET.damageBranchMap or {}
+    return table.concat({
+        "damage-v1",
+        tostring(ET.damageClassToken or "UNKNOWN"),
+        tostring(ET.damageTalentGroup or 1),
+        tostring(ET.damageSpecIndex or "ambiguous"),
+        tostring(ET.damagePreference or "ALL"),
+        tostring(map.signature or "unavailable"),
+        tostring(map.valid == true),
+    }, "|")
+end
+
+function ET.HandleDamageContextChanged(treeChanged)
+    local before = ET._damageContextKey
+    ET.damagePreference = nil
+    ET.RefreshPlayerDamagePreference()
+    if treeChanged or not ET.damageBranchMap then ET.BuildDamageBranchMap() end
+    local after = ET.GetDamageContextKey()
+    ET._damageContextKey = after
+    if before ~= after or treeChanged then
+        if ET.RefreshGeneratedShoppingProfiles then ET.RefreshGeneratedShoppingProfiles(treeChanged == true) end
+        if ET.shoppingFrame and ET.shoppingFrame.IsShown and ET.shoppingFrame:IsShown() and ET.RefreshShoppingUI then ET.RefreshShoppingUI() end
+        if ET.UpdateDamageSelector then ET.UpdateDamageSelector() end
+        if selectedCategory == "DAMAGE" and mainFrame and mainFrame:IsShown() then
+            rebuildFiltered()
+            if listScroll and type(FauxScrollFrame_SetOffset) == "function" then FauxScrollFrame_SetOffset(listScroll, 0) end
+            refreshRows()
+        end
+    end
 end
 
 rebuildFiltered = function()
