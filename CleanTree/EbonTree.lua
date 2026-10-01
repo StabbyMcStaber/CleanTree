@@ -3553,6 +3553,150 @@ function ET.ShoppingOrderedIDs(categoryOrder, cheapest)
     return ids
 end
 
+function ET.LegacyDamageFirstIDs()
+    return ET.ShoppingOrderedIDs({"DAMAGE", "SURVIVAL", "CONVENIENCE", "OTHER"}, false)
+end
+
+function ET.ShoppingParentsByID(id)
+    id = tonumber(id)
+    local bridge = _G.CleanTreeEbonAPI
+    if bridge and bridge.GetParents then
+        local parents = bridge.GetParents(id)
+        if type(parents) == "table" then return parents end
+    end
+    local graph = _G.EbonTreeOrderData
+    return graph and graph.parentsById and graph.parentsById[id] or nil
+end
+
+function ET.DamageFirstOrderedIDs()
+    local preference = ET.GetPlayerDamagePreference()
+    if not ET.damageBranchMap then ET.BuildDamageBranchMap() end
+    if preference == "ALL" or not ET.damageBranchMap or not ET.damageBranchMap.valid then
+        ET.damageShoppingTopologyFallback = false
+        return ET.LegacyDamageFirstIDs()
+    end
+
+    local ids, idSet = {}, {}
+    for id in pairs(DATA.nodes or {}) do
+        id = tonumber(id)
+        if id then ids[#ids + 1] = id; idSet[id] = true end
+    end
+
+    local parentsById, children, indegree = {}, {}, {}
+    for _, id in ipairs(ids) do
+        local parents = ET.ShoppingParentsByID(id) or {}
+        parentsById[id] = {}
+        indegree[id] = 0
+        for _, parentId in ipairs(parents) do
+            parentId = tonumber(parentId)
+            if parentId and idSet[parentId] then
+                parentsById[id][#parentsById[id] + 1] = parentId
+                children[parentId] = children[parentId] or {}
+                children[parentId][#children[parentId] + 1] = id
+                indegree[id] = indegree[id] + 1
+            end
+        end
+    end
+
+    local preferredTargets, requiredAncestors = {}, {}
+    for _, id in ipairs(ids) do
+        if ET.ShoppingCategoryByID(id) == "DAMAGE" then
+            local branch = ET.GetDamageBranch(id)
+            if branch == "ROOT" or branch == "MIXED" or branch == "GENERAL" or branch == preference then
+                preferredTargets[id] = true
+            end
+        end
+    end
+    local queue, qi = {}, 1
+    for id in pairs(preferredTargets) do queue[#queue + 1] = id end
+    while queue[qi] do
+        local id = queue[qi]
+        qi = qi + 1
+        for _, parentId in ipairs(parentsById[id] or {}) do
+            if not preferredTargets[parentId] and not requiredAncestors[parentId] then
+                requiredAncestors[parentId] = true
+                queue[#queue + 1] = parentId
+            end
+        end
+    end
+
+    local function priority(id)
+        if requiredAncestors[id] then return 1 end
+        local category = ET.ShoppingCategoryByID(id)
+        if category == "DAMAGE" then
+            local branch = ET.GetDamageBranch(id)
+            if branch == "ROOT" or branch == "MIXED" or branch == "GENERAL" then return 1 end
+            if branch == preference then return 2 end
+            return 6
+        elseif category == "SURVIVAL" then return 3
+        elseif category == "CONVENIENCE" then return 4
+        else return 5 end
+    end
+
+    local graph = _G.EbonTreeOrderData
+    local function stableOrder(id)
+        return graph and graph.orderById and tonumber(graph.orderById[id]) or 2147483647
+    end
+    local function better(a, b)
+        local ap, bp = priority(a), priority(b)
+        if ap ~= bp then return ap < bp end
+        local ao, bo = stableOrder(a), stableOrder(b)
+        if ao ~= bo then return ao < bo end
+        return a < b
+    end
+
+    local ready = {}
+    for _, id in ipairs(ids) do if indegree[id] == 0 then ready[#ready + 1] = id end end
+    local out = {}
+    while #ready > 0 do
+        local bestIndex = 1
+        for i = 2, #ready do if better(ready[i], ready[bestIndex]) then bestIndex = i end end
+        local id = table.remove(ready, bestIndex)
+        out[#out + 1] = id
+        for _, childId in ipairs(children[id] or {}) do
+            indegree[childId] = indegree[childId] - 1
+            if indegree[childId] == 0 then ready[#ready + 1] = childId end
+        end
+    end
+
+    if #out ~= #ids then
+        ET.damageShoppingTopologyFallback = true
+        return ET.LegacyDamageFirstIDs()
+    end
+    ET.damageShoppingTopologyFallback = false
+    return out
+end
+
+function ET.IDListsEqual(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then return false end
+    for i = 1, #a do if tonumber(a[i]) ~= tonumber(b[i]) then return false end end
+    return true
+end
+
+function ET.MarkShoppingListModified(list)
+    if not list then return end
+    list.seeded = nil
+    list.profile = nil
+    list.generatedContext = nil
+    list.generatedProfileVersion = nil
+    list.userModified = true
+end
+
+function ET.RefreshGeneratedShoppingProfiles(force)
+    if type(EbonTreeDB.shoppingLists) ~= "table" then return end
+    local context = ET.GetDamageContextKey()
+    for _, list in pairs(EbonTreeDB.shoppingLists) do
+        if type(list) == "table" and list.profile == "DAMAGE_FIRST" then
+            if force or list.generatedContext ~= context or tonumber(list.generatedProfileVersion or 0) < 1 then
+                list.entries = ET.CopyIDList(ET.DamageFirstOrderedIDs())
+                list.generatedContext = context
+                list.generatedProfileVersion = 1
+                list.seeded = true
+            end
+        end
+    end
+end
+
 function ET.ShoppingBalancedIDs()
     local buckets = { DAMAGE = {}, SURVIVAL = {}, CONVENIENCE = {}, OTHER = {} }
     local all = ET.ShoppingOrderedIDs(nil, false)
@@ -3581,10 +3725,12 @@ end
 
 function ET.EnsureShoppingLists()
     if type(EbonTreeDB.shoppingLists) ~= "table" then EbonTreeDB.shoppingLists = {} end
-    if tonumber(EbonTreeDB.shoppingSeedVersion or 0) < ET.SHOPPING_SEED_VERSION then
+    local seedVersion = tonumber(EbonTreeDB.shoppingSeedVersion or 0)
+
+    if seedVersion < 1 then
         local seeds = {
             {"Full Tree Order", ET.ShoppingOrderedIDs(nil, false)},
-            {"Damage First", ET.ShoppingOrderedIDs({"DAMAGE", "SURVIVAL", "CONVENIENCE", "OTHER"}, false)},
+            {"Damage First", ET.LegacyDamageFirstIDs()},
             {"Survival First", ET.ShoppingOrderedIDs({"SURVIVAL", "DAMAGE", "CONVENIENCE", "OTHER"}, false)},
             {"Convenience First", ET.ShoppingOrderedIDs({"CONVENIENCE", "DAMAGE", "SURVIVAL", "OTHER"}, false)},
             {"Balanced", ET.ShoppingBalancedIDs()},
@@ -3595,8 +3741,35 @@ function ET.EnsureShoppingLists()
                 EbonTreeDB.shoppingLists[seed[1]] = { name = seed[1], entries = ET.CopyIDList(seed[2]), seeded = true }
             end
         end
-        EbonTreeDB.shoppingSeedVersion = ET.SHOPPING_SEED_VERSION
+        seedVersion = 1
     end
+
+    if seedVersion < 2 then
+        local legacy = ET.LegacyDamageFirstIDs()
+        local damage = EbonTreeDB.shoppingLists["Damage First"]
+        if not damage then
+            EbonTreeDB.shoppingLists["Damage First"] = { name = "Damage First", entries = {}, seeded = true, profile = "DAMAGE_FIRST" }
+        elseif damage.profile == "DAMAGE_FIRST" then
+            -- Already migrated by a prior test build.
+        elseif damage.seeded == true and ET.IDListsEqual(damage.entries or {}, legacy) then
+            damage.profile = "DAMAGE_FIRST"
+            damage.userModified = nil
+        else
+            -- Preserve a user-modified legacy Damage First verbatim and create
+            -- the adaptive built-in beside it rather than destroying edits.
+            local base, candidate, i = "Damage First (Recommended)", "Damage First (Recommended)", 2
+            while EbonTreeDB.shoppingLists[candidate] do
+                candidate = base .. " (" .. tostring(i) .. ")"
+                i = i + 1
+            end
+            EbonTreeDB.shoppingLists[candidate] = { name = candidate, entries = {}, seeded = true, profile = "DAMAGE_FIRST" }
+        end
+        seedVersion = 2
+    end
+
+    EbonTreeDB.shoppingSeedVersion = seedVersion
+    ET.RefreshGeneratedShoppingProfiles()
+
     if not EbonTreeDB.activeShoppingList or not EbonTreeDB.shoppingLists[EbonTreeDB.activeShoppingList] then
         EbonTreeDB.activeShoppingList = "Full Tree Order"
     end
@@ -3608,7 +3781,7 @@ end
 function ET.ShoppingListNames()
     ET.EnsureShoppingLists()
     local names = {}
-    local preferred = {"Full Tree Order", "Damage First", "Survival First", "Convenience First", "Balanced", "Cheapest First"}
+    local preferred = {"Full Tree Order", "Damage First", "Damage First (Recommended)", "Survival First", "Convenience First", "Balanced", "Cheapest First"}
     local seen = {}
     for _, name in ipairs(preferred) do
         if EbonTreeDB.shoppingLists[name] then names[#names + 1] = name; seen[name] = true end
