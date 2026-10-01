@@ -2,7 +2,7 @@
 ## Title: CleanTree
 ## Notes: Project Ebonhold Soul Ash Skill Tree replacement UI / skin.
 ## Author: Stan + CarolJean
-## Version: 1.1.1
+## Version: 1.2.0
 ## Dependencies: EbonAPI
 ## OptionalDeps: ProjectEbonhold
 ## SavedVariables: EbonTreeDB
