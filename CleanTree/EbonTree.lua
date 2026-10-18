@@ -126,6 +126,9 @@ local statusExpire = 0
 local setStatus
 local rebuildFiltered
 local refreshRows
+local refreshHeader
+local refreshPendingPanel
+local refreshDetail
 local nodeCost
 local nodeAffordability
 local syncNodeOwnership
@@ -2795,7 +2798,7 @@ ET.FinishInitialLoad = function()
     if #filteredNodes > 0 then refreshDetail(filteredNodes[1]) end
 end
 
-local function refreshPendingPanel()
+refreshPendingPanel = function()
     if not pendingText or not pendingSpendText then return end
     local lines = pendingSummaryLines()
     if #lines == 0 then
@@ -2819,7 +2822,7 @@ local function refreshPendingPanel()
     pendingSpendText:SetText(footer)
 end
 
-local function refreshHeader()
+refreshHeader = function()
     if soulAshText then
         local ash = readSoulAsh()
         if ash then
@@ -2831,7 +2834,7 @@ local function refreshHeader()
     if scanText then scanText:SetText(currentStatusText()) end
 end
 
-local function refreshDetail(node)
+refreshDetail = function(node)
     selectedNode = node or selectedNode
     if not selectedNode or not detailTitle or not detailBody then return end
     ensureNodeBound(selectedNode)
