@@ -44,7 +44,7 @@ try {
     $priorVersion = $Matches[1].Trim()
     $pattern = '(?m)^(## Version:\s*)[^\r\n]+'
     # Replace using a match evaluator to avoid special replacement-string characters.
-    $updated = [regex]::Replace($tocContent,$pattern,[System.Text.RegularExpressions.MatchEvaluator]{param($m) $m.Groups[1].Value + $Version},1)
+    $updated = ([regex]::new($pattern)).Replace($tocContent,[System.Text.RegularExpressions.MatchEvaluator]{param($m) $m.Groups[1].Value + $Version},1)
     $noteDir = Join-Path $root '.github\release-notes'
     $notePath = Join-Path $noteDir "$tag.md"
     if (Test-Path $notePath) { throw "Release notes already exist: $notePath" }
